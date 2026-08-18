@@ -18,6 +18,6 @@ func (s *server) itemService() {
 	item := s.app.Group("/item_v1")
 
 	//help check
-	_ = item
+	item.GET("", s.healthcheckService)
 
 }

@@ -14,7 +14,7 @@ type (
 	}
 )
 
-func NewInventoryHandler(cfg *config.Config, inventoryusecase inventoryusecase.InventoryUsecaseService) InventoryHttpHandlerService {
+func NewInventoryHttpHandler(cfg *config.Config, inventoryusecase inventoryusecase.InventoryUsecaseService) InventoryHttpHandlerService {
 	return inventoryhttpHandler{
 		cfg:              cfg,
 		inventoryusecase: inventoryusecase,
