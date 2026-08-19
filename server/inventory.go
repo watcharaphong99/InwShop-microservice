@@ -15,7 +15,7 @@ func (s *server) inventoryService() {
 	_ = httpHandler
 	_ = grpcHandler
 
-	inventory := s.app.Group("/item_v1")
+	inventory := s.app.Group("/invenroty_v1")
 
 	//help check
 	inventory.GET("", s.healthcheckService)
