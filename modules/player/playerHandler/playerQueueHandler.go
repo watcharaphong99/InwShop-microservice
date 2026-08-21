@@ -14,6 +14,6 @@ type (
 	}
 )
 
-func NewPlayerQueueHandlerService(cfg *config.Config, playerUsecase playerUsecase.PlayerUsecaseService) PlayerQueueHandlerService {
+func NewPlayerQueueHandler(cfg *config.Config, playerUsecase playerUsecase.PlayerUsecaseService) PlayerQueueHandlerService {
 	return &playerQueueHandler{cfg: cfg, playerUsecase: playerUsecase}
 }

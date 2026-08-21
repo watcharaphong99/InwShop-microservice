@@ -10,6 +10,6 @@ type (
 	}
 )
 
-func NewPlayerUsecaseService(playerRepository playerRepository.PlayerRepositoryService) PlayerUsecaseService {
+func NewPlayerUsecase(playerRepository playerRepository.PlayerRepositoryService) PlayerUsecaseService {
 	return playerUsecase{playerRepository: playerRepository}
 }

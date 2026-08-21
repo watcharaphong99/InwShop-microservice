@@ -14,7 +14,7 @@ type (
 	}
 )
 
-func NewPlayerRepositoryService(db *mongo.Client) PlayerRepositoryService {
+func NewPlayerRepository(db *mongo.Client) PlayerRepositoryService {
 	return &playerRepository{db: db}
 }
 

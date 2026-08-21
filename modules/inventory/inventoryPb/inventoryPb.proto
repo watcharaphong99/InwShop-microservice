@@ -1,0 +1,29 @@
+//Version
+syntax = "proto3";
+
+package inventorypb;
+
+option go_package = "github.com/watcharaphong99/InwzaShop/modules/auth/authPb;authpb";
+
+// Structures
+message IsAvailableToSellReq {
+    string playerId = 1;
+    string itemId = 2;
+
+}
+
+message IsAvailableToSellRes {
+    bool isAvailable = 1;
+}
+
+// Methods
+service InventoryGrpcService {
+    rpc IsAvailableToSell(IsAvailableToSellReq) returns (IsAvailableToSellRes){}
+    
+}
+
+
+
+
+
+
