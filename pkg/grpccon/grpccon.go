@@ -28,7 +28,9 @@ type (
 		client *grpc.ClientConn
 	}
 
-	grpcAuth struct{}
+	grpcAuth struct {
+		secretKey string
+	}
 )
 
 func (g *grpcClientFactory) Auth() authPb.AuthGrpcServiceClient {

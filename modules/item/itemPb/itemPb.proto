@@ -19,7 +19,7 @@ message Item {
     string title = 2;
     double price = 3;
     string imageUrl = 4;
-    int32 damage = 5;
+    int32  damage = 5;
 }
 
 
@@ -27,7 +27,6 @@ message Item {
 // Methods
 service ItemGrpcService {
     rpc FindItemsInIds(FindItemsInIdsReq) returns (FindItemsInIdsRes);
-    
 }
 
 
