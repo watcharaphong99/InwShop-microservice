@@ -17,9 +17,9 @@ type (
 	}
 
 	CreatePlayerReq struct {
-		Email    string `json:"email" from:"email" validate:"required,email,max=255"`
-		Password string `json:"password" from:"password" validate:"required,max=32"`
-		Username string `json:"username" from:"username" validate:"required,max=32"`
+		Email    string `json:"email" form:"email" validate:"required,email,max=255"`
+		Password string `json:"password" form:"password" validate:"required,max=32"`
+		Username string `json:"username" form:"username" validate:"required,max=32"`
 	}
 
 	CreatePlayerTransactionReq struct {
