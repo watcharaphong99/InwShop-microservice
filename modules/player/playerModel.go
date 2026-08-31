@@ -4,11 +4,11 @@ import "time"
 
 type (
 	PlayerProfile struct {
-		Id       string    `json:"id" bson:"_id"`
-		Email    string    `json:"email"`
-		Username string    `json:"username"`
-		CreateAt time.Time `json:"create_at"`
-		UpdateAt time.Time `json:"update_at"`
+		Id        string    `json:"id" bson:"_id"`
+		Email     string    `json:"email"`
+		Username  string    `json:"username"`
+		CreatedAt time.Time `json:"create_at"`
+		UpdatedAt time.Time `json:"update_at"`
 	}
 
 	PlayerClaims struct {
@@ -23,7 +23,7 @@ type (
 	}
 
 	CreatePlayerTransactionReq struct {
-		PlayerId string `json:"player_id" validate:"required,max=64"`
-		Amount   string `json:"amount" validate:"required"`
+		PlayerId string  `json:"player_id" validate:"required,max=64"`
+		Amount   float64 `json:"amount" validate:"required"`
 	}
 )

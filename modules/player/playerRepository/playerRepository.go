@@ -7,15 +7,19 @@ import (
 	"time"
 
 	"github.com/watcharaphong99/InwzaShop/modules/player"
+	"github.com/watcharaphong99/InwzaShop/pkg/utils"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 type (
 	PlayerRepositoryService interface {
 		IsUniquePlayer(pctx context.Context, email, username string) bool
 		InsertOnePlayer(pctx context.Context, req *player.Player) (primitive.ObjectID, error)
+		FindOnePlayerProfine(pctx context.Context, playerId string) (*player.PlayerProfileBson, error)
+		InsertOnePlayerTranscation(pctx context.Context, req *player.PlayerTransaction) error
 	}
 
 	playerRepository struct {
@@ -67,4 +71,53 @@ func (r *playerRepository) InsertOnePlayer(pctx context.Context, req *player.Pla
 
 	return playerId.InsertedID.(primitive.ObjectID), nil
 
+}
+
+func (r *playerRepository) FindOnePlayerProfine(pctx context.Context, playerId string) (*player.PlayerProfileBson, error) {
+	ctx, cancle := context.WithTimeout(pctx, 10*time.Second)
+	defer cancle()
+
+	db := r.playerDbConn(ctx)
+	col := db.Collection("players")
+
+	result := new(player.PlayerProfileBson)
+
+	log.Println("playerId", playerId)
+
+	if err := col.FindOne(
+		ctx,
+		bson.M{"_id": utils.ConvertToObjectId(playerId)},
+		options.FindOne().SetProjection(
+			bson.M{
+				"_id":       1,
+				"email":     1,
+				"username":  1,
+				"create_at": 1,
+				"update_at": 1,
+			},
+		),
+	).Decode(result); err != nil {
+		log.Printf("Error: FindOnePlayerProfile: %s", err.Error())
+		return nil, errors.New("error: player profile not found")
+	}
+
+	return result, nil
+
+}
+
+func (r *playerRepository) InsertOnePlayerTranscation(pctx context.Context, req *player.PlayerTransaction) error {
+	ctx, cancle := context.WithTimeout(pctx, 10*time.Second)
+	defer cancle()
+
+	db := r.playerDbConn(ctx)
+	col := db.Collection("player_transactions")
+
+	result, err := col.InsertOne(ctx, req)
+	if err != nil {
+		log.Printf("Error: InseartOnePlayerTransaction: %s", err.Error())
+		return errors.New("error: insert one player transaction failed")
+	}
+	log.Printf("Result: InseartOnePlayerTransaction: %v", result.InsertedID)
+
+	return nil
 }
