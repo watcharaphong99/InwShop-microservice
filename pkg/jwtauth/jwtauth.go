@@ -47,9 +47,9 @@ func jwtTimeDurationCal(t int64) *jwt.NumericDate {
 	return jwt.NewNumericDate(time.Now().Add(time.Duration(t * int64(math.Pow10(9)))))
 }
 
-func jwtTimeRepeatAdaper(t int64) *jwt.NumericDate {
-	return jwt.NewNumericDate(time.Unix(t, 0))
-}
+// func jwtTimeRepeatAdaper(t int64) *jwt.NumericDate {
+// 	return jwt.NewNumericDate(time.Unix(t, 0))
+// }
 
 func NewAccessToken(secret string, expiredAt int64, claims *Claims) AuthFactory {
 	return &accessToken{
