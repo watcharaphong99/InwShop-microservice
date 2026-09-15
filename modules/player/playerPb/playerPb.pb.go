@@ -9,11 +9,12 @@
 package InwzaShop
 
 import (
-	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
-	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
+
+	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
+	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 )
 
 const (
@@ -30,8 +31,8 @@ type PlayerProfile struct {
 	Email         string                 `protobuf:"bytes,2,opt,name=email,proto3" json:"email,omitempty"`
 	Username      string                 `protobuf:"bytes,3,opt,name=username,proto3" json:"username,omitempty"`
 	RoleCode      int32                  `protobuf:"varint,4,opt,name=roleCode,proto3" json:"roleCode,omitempty"`
-	CreateAt      string                 `protobuf:"bytes,5,opt,name=create_at,json=createAt,proto3" json:"create_at,omitempty"`
-	UpdateAt      string                 `protobuf:"bytes,6,opt,name=update_at,json=updateAt,proto3" json:"update_at,omitempty"`
+	CreatedAt     string                 `protobuf:"bytes,5,opt,name=create_at,json=createAt,proto3" json:"create_at,omitempty"`
+	UpdatedAt     string                 `protobuf:"bytes,6,opt,name=update_at,json=updateAt,proto3" json:"update_at,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -96,14 +97,14 @@ func (x *PlayerProfile) GetRoleCode() int32 {
 
 func (x *PlayerProfile) GetCreateAt() string {
 	if x != nil {
-		return x.CreateAt
+		return x.CreatedAt
 	}
 	return ""
 }
 
 func (x *PlayerProfile) GetUpdateAt() string {
 	if x != nil {
-		return x.UpdateAt
+		return x.UpdatedAt
 	}
 	return ""
 }

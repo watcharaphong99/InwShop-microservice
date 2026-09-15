@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/watcharaphong99/InwzaShop/modules/player"
+	playerPb "github.com/watcharaphong99/InwzaShop/modules/player/playerPb"
 	"github.com/watcharaphong99/InwzaShop/modules/player/playerRepository"
 
 	"github.com/watcharaphong99/InwzaShop/pkg/utils"
@@ -19,6 +20,7 @@ type (
 		FindOnePlayerProfile(pctx context.Context, playerId string) (*player.PlayerProfile, error)
 		AddPlayerMoney(pctx context.Context, req *player.CreatePlayerTransactionReq) (*player.PlayerSavingAccount, error)
 		GetPlayerSavingAccount(pctx context.Context, playerId string) (*player.PlayerSavingAccount, error)
+		FindOnePlayerCredential(pctx context.Context, email, password string) (*playerPb.PlayerProfile, error)
 	}
 
 	playerUsecase struct {
@@ -96,4 +98,28 @@ func (u *playerUsecase) AddPlayerMoney(pctx context.Context, req *player.CreateP
 
 func (u *playerUsecase) GetPlayerSavingAccount(pctx context.Context, playerId string) (*player.PlayerSavingAccount, error) {
 	return u.playerRepository.GetPlayerSavingAccount(pctx, playerId)
+}
+
+func (u *playerUsecase) FindOnePlayerCredential(pctx context.Context, email, password string) (*playerPb.PlayerProfile, error) {
+	result, err := u.playerRepository.FindOnePlayerCredential(pctx, email)
+
+	if err != nil {
+		return nil, err
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(password), []byte(result.Password)); err != nil {
+		log.Printf("Error: FindOnePlayerCredential: %s", err.Error())
+		return nil, errors.New("error: password is invalid")
+	}
+
+	loc, _ := time.LoadLocation("Asia/Bangkok")
+
+	return &playerPb.PlayerProfile{
+		Id:        result.Id.Hex(),
+		Email:     result.Email,
+		Username:  result.Username,
+		CreatedAt: result.CreatedAt.In(loc).String(),
+		UpdatedAt: result.UpdatedAt.In(loc).String(),
+	}, nil
+
 }

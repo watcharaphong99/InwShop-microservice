@@ -1,10 +1,14 @@
 package jwtauth
 
 import (
+	"context"
+	"errors"
 	"math"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"google.golang.org/grpc/metadata"
 )
 
 type (
@@ -47,9 +51,9 @@ func jwtTimeDurationCal(t int64) *jwt.NumericDate {
 	return jwt.NewNumericDate(time.Now().Add(time.Duration(t * int64(math.Pow10(9)))))
 }
 
-// func jwtTimeRepeatAdaper(t int64) *jwt.NumericDate {
-// 	return jwt.NewNumericDate(time.Unix(t, 0))
-// }
+func jwtTimeRepeatAdaper(t int64) *jwt.NumericDate {
+	return jwt.NewNumericDate(time.Unix(t, 0))
+}
 
 func NewAccessToken(secret string, expiredAt int64, claims *Claims) AuthFactory {
 	return &accessToken{
@@ -68,4 +72,103 @@ func NewAccessToken(secret string, expiredAt int64, claims *Claims) AuthFactory 
 			},
 		},
 	}
+}
+
+func NewRefreshToken(secret string, expiredAt int64, claims *Claims) AuthFactory {
+	return &refreshToken{
+		authConcrete: &authConcrete{
+			Secret: []byte(secret),
+			Claims: &AuthMapClaims{
+				Claims: claims,
+				RegisteredClaims: jwt.RegisteredClaims{
+					Issuer:    "Iwpza.com",
+					Subject:   "refresh-token",
+					Audience:  []string{"Iwpza.com"},
+					ExpiresAt: jwtTimeDurationCal(expiredAt),
+					NotBefore: jwt.NewNumericDate(now()),
+					IssuedAt:  jwt.NewNumericDate(now()),
+				},
+			},
+		},
+	}
+}
+
+func ReloadToken(secret string, expiredAt int64, claims *Claims) string {
+	obj := &refreshToken{
+		authConcrete: &authConcrete{
+			Secret: []byte(secret),
+			Claims: &AuthMapClaims{
+				Claims: claims,
+				RegisteredClaims: jwt.RegisteredClaims{
+					Issuer:    "Iwpza.com",
+					Subject:   "refresh-token",
+					Audience:  []string{"Iwpza.com"},
+					ExpiresAt: jwtTimeRepeatAdaper(expiredAt),
+					NotBefore: jwt.NewNumericDate(now()),
+					IssuedAt:  jwt.NewNumericDate(now()),
+				},
+			},
+		},
+	}
+
+	return obj.SignToken()
+}
+
+func NewApiKey(secret string) AuthFactory {
+	return &accessToken{
+		authConcrete: &authConcrete{
+			Secret: []byte(secret),
+			Claims: &AuthMapClaims{
+				Claims: &Claims{},
+				RegisteredClaims: jwt.RegisteredClaims{
+					Issuer:    "Iwpza.com",
+					Subject:   "api-key",
+					Audience:  []string{"Iwpza.com"},
+					ExpiresAt: jwtTimeDurationCal(31560000),
+					NotBefore: jwt.NewNumericDate(now()),
+					IssuedAt:  jwt.NewNumericDate(now()),
+				},
+			},
+		},
+	}
+}
+
+func ParseToken(secret string, tokentString string) (*AuthMapClaims, error) {
+	token, err := jwt.ParseWithClaims(tokentString, &AuthMapClaims{}, func(t *jwt.Token) (interface{}, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, errors.New("error: unexpected signing method")
+		}
+		return []byte(secret), nil
+	})
+
+	if err != nil {
+		if errors.Is(err, jwt.ErrTokenMalformed) {
+			return nil, errors.New("error: token format is invalid")
+		} else if errors.Is(err, jwt.ErrTokenExpired) {
+			return nil, errors.New("error: token is expired")
+		} else {
+			return nil, errors.New("error: token is invalid")
+		}
+	}
+
+	if claim, ok := token.Claims.(*AuthMapClaims); ok {
+		return claim, nil
+	} else {
+		return nil, errors.New("error: claims type is invalid")
+	}
+}
+
+// api key generator
+var apiKeyInstant string
+var once sync.Once
+
+func SetApiKey(secret string) {
+	once.Do(func() {
+		apiKeyInstant = NewApiKey(secret).SignToken()
+	})
+}
+
+func SetApiKeyInContext(pctx *context.Context) {
+	*pctx = metadata.NewOutgoingContext(*pctx, metadata.Pairs("auth", apiKeyInstant))
+
 }
