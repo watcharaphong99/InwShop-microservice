@@ -3,6 +3,7 @@ package jwtauth
 import (
 	"context"
 	"errors"
+	"log"
 	"math"
 	"sync"
 	"time"
@@ -17,7 +18,7 @@ type (
 	}
 
 	Claims struct {
-		Id       string `json:"id"`
+		PlayerId string `json:"player_id"`
 		RoleCode int    `json:"role_code"`
 	}
 
@@ -37,8 +38,12 @@ type (
 )
 
 func (a *authConcrete) SignToken() string {
-	token := jwt.NewWithClaims(jwt.SigningMethodES256, a.Claims)
-	ss, _ := token.SignedString(a.Secret)
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, a.Claims)
+	ss, err := token.SignedString(a.Secret)
+	if err != nil {
+		log.Printf("Error: SignToken failed: %s", err.Error())
+		return ""
+	}
 	return ss
 }
 

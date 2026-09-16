@@ -94,8 +94,8 @@ func (r *playerRepository) FindOnePlayerProfine(pctx context.Context, playerId s
 				"_id":       1,
 				"email":     1,
 				"username":  1,
-				"create_at": 1,
-				"update_at": 1,
+				"created_at": 1,
+				"updated_at": 1,
 			},
 		),
 	).Decode(result); err != nil {
@@ -186,6 +186,8 @@ func (r *playerRepository) FindOnePlayerCredential(pctx context.Context, email s
 	col := db.Collection("players")
 
 	result := new(player.Player)
+
+	log.Printf("email", email)
 
 	if err := col.FindOne(ctx, bson.M{"email": email}).Decode(result); err != nil {
 

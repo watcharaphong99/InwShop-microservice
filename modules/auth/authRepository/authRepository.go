@@ -6,14 +6,22 @@ import (
 	"log"
 	"time"
 
+	"github.com/watcharaphong99/InwzaShop/modules/auth"
 	playerPb "github.com/watcharaphong99/InwzaShop/modules/player/playerPb"
 
 	"github.com/watcharaphong99/InwzaShop/pkg/grpccon"
+	"github.com/watcharaphong99/InwzaShop/pkg/utils"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
 type (
-	AuthRepositoryService interface{}
+	AuthRepositoryService interface {
+		InsertOnePlayerCredential(pctx context.Context, req *auth.Credential) (primitive.ObjectID, error)
+		CredentialSearch(pctx context.Context, grpcUrl string, req *playerPb.CredentialSearchReq) (*playerPb.PlayerProfile, error)
+		FindOnePlayerCredential(pctx context.Context, credentialId string) (*auth.Credential, error)
+	}
 
 	authRepository struct {
 		db *mongo.Client
@@ -42,7 +50,40 @@ func (r *authRepository) CredentialSearch(pctx context.Context, grpcUrl string, 
 
 	if err != nil {
 		log.Printf("Error: CredentialSearch failed: %s", err.Error())
-		return nil, errors.New(err.Error())
+		return nil, errors.New("error: email or password is incorrect")
+	}
+
+	return result, nil
+}
+
+func (r *authRepository) InsertOnePlayerCredential(pctx context.Context, req *auth.Credential) (primitive.ObjectID, error) {
+	ctx, cancle := context.WithTimeout(pctx, 10*time.Second)
+	defer cancle()
+
+	db := r.authDbconn(ctx)
+	col := db.Collection("auth")
+
+	result, err := col.InsertOne(ctx, req)
+	if err != nil {
+		log.Printf("Error: InsetOnePlayerCredential failed: %s", err.Error())
+		return primitive.NewObjectID(), errors.New("error: insert one player credential failed")
+	}
+
+	return result.InsertedID.(primitive.ObjectID), nil
+}
+
+func (r *authRepository) FindOnePlayerCredential(pctx context.Context, credentialId string) (*auth.Credential, error) {
+	ctx, cancel := context.WithTimeout(pctx, 10*time.Second)
+	defer cancel()
+
+	db := r.authDbconn(ctx)
+	col := db.Collection("auth")
+
+	result := new(auth.Credential)
+
+	if err := col.FindOne(ctx, bson.M{"_id": utils.ConvertToObjectId(credentialId)}).Decode(result); err != nil {
+		log.Printf("Error: FindOnePlayerCredential failed: %s", err.Error())
+		return nil, errors.New("error: find one player credential failed")
 	}
 
 	return result, nil

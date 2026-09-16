@@ -18,11 +18,19 @@ func LocalTime() time.Time {
 }
 
 func CovertStringTimeToTime(t string) time.Time {
-	layout := "2006-01-02 15:04:05.999 -0700 MST"
-	result, err := time.Parse(layout, t)
-	if err != nil {
-		log.Printf("Error: Parse time failed: %s", err.Error())
+	layouts := []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02 15:04:05.999999999 -0700 MST",
 	}
-	return result
 
+	for _, layout := range layouts {
+		result, err := time.Parse(layout, t)
+		if err == nil {
+			return result
+		}
+	}
+
+	log.Printf("Error: Parse time failed: %s", t)
+	return time.Time{}
 }
