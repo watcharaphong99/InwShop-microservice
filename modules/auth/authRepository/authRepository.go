@@ -21,6 +21,7 @@ type (
 		InsertOnePlayerCredential(pctx context.Context, req *auth.Credential) (primitive.ObjectID, error)
 		CredentialSearch(pctx context.Context, grpcUrl string, req *playerPb.CredentialSearchReq) (*playerPb.PlayerProfile, error)
 		FindOnePlayerCredential(pctx context.Context, credentialId string) (*auth.Credential, error)
+		FindOnePlayerProfileTokenRefresh(pctx context.Context, grpcUrl string, req *playerPb.FindOnePlayerProfileToRefreshReq) (*playerPb.PlayerProfile, error)
 	}
 
 	authRepository struct {
@@ -51,6 +52,26 @@ func (r *authRepository) CredentialSearch(pctx context.Context, grpcUrl string, 
 	if err != nil {
 		log.Printf("Error: CredentialSearch failed: %s", err.Error())
 		return nil, errors.New("error: email or password is incorrect")
+	}
+
+	return result, nil
+}
+
+func (r *authRepository) FindOnePlayerProfileTokenRefresh(pctx context.Context, grpcUrl string, req *playerPb.FindOnePlayerProfileToRefreshReq) (*playerPb.PlayerProfile, error) {
+	ctx, cancel := context.WithTimeout(pctx, 30*time.Second)
+	defer cancel()
+
+	conn, err := grpccon.NewGrpcClient(grpcUrl)
+	if err != nil {
+		log.Printf("Error: gRPC conection failed: %s", err.Error())
+		return nil, errors.New("error: gRpc connection failed")
+	}
+
+	result, err := conn.Player().FindOnePlayerProfileToRefresh(ctx, req)
+
+	if err != nil {
+		log.Printf("Error: FindOnePlayerProfileToRefresh failed: %s", err.Error())
+		return nil, errors.New("error: player profine not found")
 	}
 
 	return result, nil
