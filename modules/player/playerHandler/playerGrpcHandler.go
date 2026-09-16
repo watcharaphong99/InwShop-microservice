@@ -22,7 +22,7 @@ func (g *playerGrpcHandler) CredentialSearch(ctx context.Context, req *playerPb.
 	return g.playerUsecase.FindOnePlayerCredential(ctx, req.Email, req.Password)
 }
 
-func (g *playerGrpcHandler) FindOnePlayerProfileToRefresh(ctx context.Context, req *playerPb.FindOnePlayerProfileToRefreshReq) (*playerPb.PlayerProfile, error) {
+func (g *playerGrpcHandler) FindOnePlayerProfileToRefreshFindOnePlayerProfileToRefresh(ctx context.Context, req *playerPb.FindOnePlayerProfileToRefreshReq) (*playerPb.PlayerProfile, error) {
 	return g.playerUsecase.FindOnePlayerProfileToRefresh(ctx, req.PlayerId)
 }
 
