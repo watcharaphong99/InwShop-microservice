@@ -149,7 +149,7 @@ func (u *playerUsecase) FindOnePlayerProfileToRefresh(pctx context.Context, play
 		Email:     result.Email,
 		Username:  result.Username,
 		RoleCode:  int32(roleCode),
-		CreatedAt: result.CreatedAt.In(loc).String(),
-		UpdatedAt: result.UpdatedAt.In(loc).String(),
+		CreatedAt: result.CreatedAt.In(loc).Format(time.RFC3339Nano),
+		UpdatedAt: result.UpdatedAt.In(loc).Format(time.RFC3339Nano),
 	}, nil
 }

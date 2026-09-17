@@ -17,7 +17,7 @@ func LocalTime() time.Time {
 	return time.Now().In(loc)
 }
 
-func CovertStringTimeToTime(t string) time.Time {
+func ConvertStringTimeToTime(t string) time.Time {
 	layouts := []string{
 		time.RFC3339Nano,
 		time.RFC3339,

@@ -21,7 +21,9 @@ type (
 		InsertOnePlayerCredential(pctx context.Context, req *auth.Credential) (primitive.ObjectID, error)
 		CredentialSearch(pctx context.Context, grpcUrl string, req *playerPb.CredentialSearchReq) (*playerPb.PlayerProfile, error)
 		FindOnePlayerCredential(pctx context.Context, credentialId string) (*auth.Credential, error)
-		FindOnePlayerProfileTokenRefresh(pctx context.Context, grpcUrl string, req *playerPb.FindOnePlayerProfileToRefreshReq) (*playerPb.PlayerProfile, error)
+		FindOnePlayerProfileToRefresh(pctx context.Context, grpcUrl string, req *playerPb.FindOnePlayerProfileToRefreshReq) (*playerPb.PlayerProfile, error)
+		UpdateOnePlayerCredential(pctx context.Context, credentialId string, req *auth.UpdateRefreshTokenReq) error
+		DeleteOnePlayerCredential(pctx context.Context, credentialId string) (int64, error)
 	}
 
 	authRepository struct {
@@ -33,7 +35,7 @@ func NewRepository(db *mongo.Client) AuthRepositoryService {
 	return &authRepository{db: db}
 }
 
-func (r *authRepository) authDbconn(pctx context.Context) *mongo.Database {
+func (r *authRepository) authDbConn(pctx context.Context) *mongo.Database {
 	return r.db.Database("auth_db")
 }
 
@@ -57,7 +59,7 @@ func (r *authRepository) CredentialSearch(pctx context.Context, grpcUrl string, 
 	return result, nil
 }
 
-func (r *authRepository) FindOnePlayerProfileTokenRefresh(pctx context.Context, grpcUrl string, req *playerPb.FindOnePlayerProfileToRefreshReq) (*playerPb.PlayerProfile, error) {
+func (r *authRepository) FindOnePlayerProfileToRefresh(pctx context.Context, grpcUrl string, req *playerPb.FindOnePlayerProfileToRefreshReq) (*playerPb.PlayerProfile, error) {
 	ctx, cancel := context.WithTimeout(pctx, 30*time.Second)
 	defer cancel()
 
@@ -71,7 +73,7 @@ func (r *authRepository) FindOnePlayerProfileTokenRefresh(pctx context.Context, 
 
 	if err != nil {
 		log.Printf("Error: FindOnePlayerProfileToRefresh failed: %s", err.Error())
-		return nil, errors.New("error: player profine not found")
+		return nil, errors.New("error: player profile not found")
 	}
 
 	return result, nil
@@ -81,7 +83,7 @@ func (r *authRepository) InsertOnePlayerCredential(pctx context.Context, req *au
 	ctx, cancle := context.WithTimeout(pctx, 10*time.Second)
 	defer cancle()
 
-	db := r.authDbconn(ctx)
+	db := r.authDbConn(ctx)
 	col := db.Collection("auth")
 
 	result, err := col.InsertOne(ctx, req)
@@ -97,7 +99,7 @@ func (r *authRepository) FindOnePlayerCredential(pctx context.Context, credentia
 	ctx, cancel := context.WithTimeout(pctx, 10*time.Second)
 	defer cancel()
 
-	db := r.authDbconn(ctx)
+	db := r.authDbConn(ctx)
 	col := db.Collection("auth")
 
 	result := new(auth.Credential)
@@ -108,4 +110,58 @@ func (r *authRepository) FindOnePlayerCredential(pctx context.Context, credentia
 	}
 
 	return result, nil
+}
+
+func (r *authRepository) UpdateOnePlayerCredential(pctx context.Context, credentialId string, req *auth.UpdateRefreshTokenReq) error {
+	ctx, cancel := context.WithTimeout(pctx, 10*time.Second)
+	defer cancel()
+
+	db := r.authDbConn(ctx)
+	col := db.Collection("auth")
+
+	result, err := col.UpdateOne(
+		ctx,
+		bson.M{"_id": utils.ConvertToObjectId(credentialId)},
+		bson.M{
+			"$set": bson.M{
+				"player_id":     req.PlayerId,
+				"access_token":  req.AccessToken,
+				"refresh_token": req.RefreshToken,
+				"updated_at":    req.UpdatedAt,
+			},
+		},
+	)
+	if err != nil {
+		log.Printf("Error: UpdateOnePlayerCredential failed: %s", err.Error())
+		return errors.New("error: player credential not found")
+	}
+	if result.MatchedCount == 0 {
+		return errors.New("error: player credential not found")
+	}
+
+	return nil
+}
+
+func (r *authRepository) DeleteOnePlayerCredential(pctx context.Context, credentialId string) (int64, error) {
+	ctx, cancel := context.WithTimeout(pctx, 10*time.Second)
+	defer cancel()
+
+	objectId, err := utils.ParseObjectId(credentialId)
+	if err != nil {
+		return 0, errors.New("error: credential id is invalid")
+	}
+
+	db := r.authDbConn(ctx)
+	col := db.Collection("auth")
+
+	result, err := col.DeleteOne(ctx, bson.M{"_id": objectId})
+	if err != nil {
+		log.Printf("Error: DeleteOnePlayerCredential failed: %s", err.Error())
+		return 0, errors.New("error: delete player credential failed")
+	}
+	if result.DeletedCount == 0 {
+		return 0, errors.New("error: player credential not found")
+	}
+
+	return result.DeletedCount, nil
 }
