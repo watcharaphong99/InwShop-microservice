@@ -1,6 +1,8 @@
 package authHandler
 
 import (
+	"context"
+
 	authPb "github.com/watcharaphong99/InwzaShop/modules/auth/authPb"
 	authUsecase "github.com/watcharaphong99/InwzaShop/modules/auth/authUseCase"
 )
@@ -16,4 +18,8 @@ func NewAuthGrpcHandler(authUsecase authUsecase.AuthUsecaseService) *authGrpcHan
 	return &authGrpcHandler{
 		authUsecase: authUsecase,
 	}
+}
+
+func (g *authGrpcHandler) AccessTokenSearch(ctx context.Context, req *authPb.AccessTokenSearchReq) (*authPb.AccessTokenSearchRes, error) {
+	return g.authUsecase.AccessTokenSearch(ctx, req.AccessToken)
 }

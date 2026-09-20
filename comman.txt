@@ -23,4 +23,4 @@ inventory
     --go-grpc_out=. --go-grpc_opt=paths=source_relative \
     ./modules/inventory/inventoryPb/inventoryPb.proto
 
-    go run main.go ./env/dev/.env.auth
+  คำสั่ง รัน  go run main.go ./env/dev/.env.auth

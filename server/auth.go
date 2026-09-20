@@ -26,9 +26,6 @@ func (s *server) authService() {
 		grpcServer.Serve(lis)
 	}()
 
-	// _ = httpHandler
-	_ = grpcHandler
-
 	auth := s.app.Group("/auth_v1")
 
 	//help check
