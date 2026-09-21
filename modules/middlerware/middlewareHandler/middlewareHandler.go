@@ -13,6 +13,8 @@ import (
 type (
 	MiddlewareHandlerService interface {
 		JwtAuthorization(next echo.HandlerFunc) echo.HandlerFunc
+		RbacAuthorization(next echo.HandlerFunc, expected []int) echo.HandlerFunc
+		PlayerIdParamValidation(next echo.HandlerFunc) echo.HandlerFunc
 	}
 
 	middlewareHandler struct {
@@ -37,5 +39,28 @@ func (h *middlewareHandler) JwtAuthorization(next echo.HandlerFunc) echo.Handler
 		}
 
 		return next(newCtx)
+	}
+}
+
+func (h *middlewareHandler) RbacAuthorization(next echo.HandlerFunc, expected []int) echo.HandlerFunc {
+	return func(c echo.Context) error {
+
+		newCtx, err := h.middlewareUsecase.RbacAuthorization(c, h.cfg, expected)
+		if err != nil {
+			return response.ErrResponse(c, http.StatusUnauthorized, err.Error())
+		}
+
+		return next(newCtx)
+	}
+}
+
+func (h *middlewareHandler) PlayerIdParamValidation(next echo.HandlerFunc) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		nexCtx, err := h.middlewareUsecase.PlayerIdParamValidation(c)
+		if err != nil {
+			return response.ErrResponse(c, http.StatusUnauthorized, err.Error())
+		}
+
+		return next(nexCtx)
 	}
 }

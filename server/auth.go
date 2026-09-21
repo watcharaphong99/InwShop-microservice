@@ -29,7 +29,8 @@ func (s *server) authService() {
 	auth := s.app.Group("/auth_v1")
 
 	//help check
-	auth.GET("", s.healthcheckService)
+	auth.GET("/test/:player_id", s.healthcheckService, s.middleware.JwtAuthorization, s.middleware.PlayerIdParamValidation)
+	// auth.GET("/test/:player_id", s.healthcheckService)
 	auth.POST("/auth/login", httpHandler.Login)
 	auth.POST("/auth/refresh-token", httpHandler.RefreshToken)
 	auth.POST("/auth/logout", httpHandler.Logout)

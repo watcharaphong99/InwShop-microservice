@@ -22,6 +22,7 @@ type (
 		Player() playerPb.PlayerGrpcServiceClient
 		Inventory() inventoryPb.InventoryGrpcServiceClient
 		Item() itemPb.ItemGrpcServiceClient
+		Close() error
 	}
 
 	grpcClientFactory struct {
@@ -47,6 +48,13 @@ func (g *grpcClientFactory) Inventory() inventoryPb.InventoryGrpcServiceClient {
 
 func (g *grpcClientFactory) Item() itemPb.ItemGrpcServiceClient {
 	return itemPb.NewItemGrpcServiceClient(g.client)
+}
+
+func (g *grpcClientFactory) Close() error {
+	if g.client == nil {
+		return nil
+	}
+	return g.client.Close()
 }
 
 func NewGrpcClient(host string) (GrpcClientFactoryHandler, error) {

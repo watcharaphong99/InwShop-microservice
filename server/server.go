@@ -22,10 +22,10 @@ import (
 
 type (
 	server struct {
-		app         *echo.Echo
-		db          *mongo.Client
-		cfg         *config.Config
-		middlerware middlewareHandler.MiddlewareHandlerService
+		app        *echo.Echo
+		db         *mongo.Client
+		cfg        *config.Config
+		middleware middlewareHandler.MiddlewareHandlerService
 	}
 )
 
@@ -59,10 +59,10 @@ func (s *server) httpListening() {
 
 func Start(pctx context.Context, cfg *config.Config, db *mongo.Client) {
 	s := &server{
-		app:         echo.New(),
-		db:          db,
-		cfg:         cfg,
-		middlerware: newMiddleware(cfg),
+		app:        echo.New(),
+		db:         db,
+		cfg:        cfg,
+		middleware: newMiddleware(cfg),
 	}
 
 	//Basic MiddleWare
