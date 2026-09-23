@@ -14,6 +14,7 @@ import (
 	"github.com/watcharaphong99/InwzaShop/modules/player"
 	playerPb "github.com/watcharaphong99/InwzaShop/modules/player/playerPb"
 	"github.com/watcharaphong99/InwzaShop/pkg/jwtauth"
+	"github.com/watcharaphong99/InwzaShop/pkg/rediscon"
 	"github.com/watcharaphong99/InwzaShop/pkg/utils"
 )
 
@@ -28,11 +29,17 @@ type (
 
 	authUsecase struct {
 		authRepository authRepository.AuthRepositoryService
+		cache          *rediscon.Client
+		accessTTL      time.Duration
 	}
 )
 
-func NewAuthUseCase(authRepository authRepository.AuthRepositoryService) AuthUsecaseService {
-	return &authUsecase{authRepository: authRepository}
+func NewAuthUseCase(authRepository authRepository.AuthRepositoryService, cache *rediscon.Client, accessDuration int64) AuthUsecaseService {
+	return &authUsecase{
+		authRepository: authRepository,
+		cache:          cache,
+		accessTTL:      time.Duration(accessDuration) * time.Second,
+	}
 }
 
 func (u *authUsecase) Login(pctx context.Context, cfg *config.Config, req *auth.PlayerLoginReq) (*auth.ProfileIntercepter, error) {
@@ -73,6 +80,8 @@ func (u *authUsecase) Login(pctx context.Context, cfg *config.Config, req *auth.
 	if err != nil {
 		return nil, err
 	}
+
+	u.cache.SetAccessToken(pctx, credential.AccessToken, u.accessTTL)
 
 	loc, err := time.LoadLocation("Asia/Bangkok")
 	if err != nil {
@@ -141,6 +150,8 @@ func (u *authUsecase) RefreshToken(pctx context.Context, cfg *config.Config, req
 		RoleCode: int(profile.RoleCode),
 	})
 
+	oldAccessToken := credential.AccessToken
+
 	if err := u.authRepository.UpdateOnePlayerCredential(pctx, req.CredentialId, &auth.UpdateRefreshTokenReq{
 		PlayerId:     playerId,
 		AccessToken:  accessToken,
@@ -149,6 +160,9 @@ func (u *authUsecase) RefreshToken(pctx context.Context, cfg *config.Config, req
 	}); err != nil {
 		return nil, err
 	}
+
+	u.cache.DelAccessToken(pctx, oldAccessToken)
+	u.cache.SetAccessToken(pctx, accessToken, u.accessTTL)
 
 	credential, err = u.authRepository.FindOnePlayerCredential(pctx, req.CredentialId)
 	if err != nil {
@@ -185,10 +199,18 @@ func formatPlayerId(id string) string {
 }
 
 func (u *authUsecase) Logout(pctx context.Context, credentialId string) (int64, error) {
+	credential, err := u.authRepository.FindOnePlayerCredential(pctx, credentialId)
+	if err == nil {
+		u.cache.DelAccessToken(pctx, credential.AccessToken)
+	}
 	return u.authRepository.DeleteOnePlayerCredential(pctx, credentialId)
 }
 
 func (u *authUsecase) AccessTokenSearch(pctx context.Context, accessToken string) (*authPb.AccessTokenSearchRes, error) {
+	if u.cache.HasAccessToken(pctx, accessToken) {
+		return &authPb.AccessTokenSearchRes{IsValid: true}, nil
+	}
+
 	credential, err := u.authRepository.FindOneAccessToken(pctx, accessToken)
 	if err != nil {
 		return &authPb.AccessTokenSearchRes{
@@ -202,16 +224,24 @@ func (u *authUsecase) AccessTokenSearch(pctx context.Context, accessToken string
 		}, errors.New("error: access token is invalid")
 	}
 
+	u.cache.SetAccessToken(pctx, accessToken, u.accessTTL)
+
 	return &authPb.AccessTokenSearchRes{
 		IsValid: true,
 	}, nil
 }
 
 func (u *authUsecase) RolesCount(pctx context.Context) (*authPb.RolesCountRes, error) {
+	if count, ok := u.cache.GetRolesCount(pctx); ok {
+		return &authPb.RolesCountRes{Count: count}, nil
+	}
+
 	result, err := u.authRepository.RolesCount(pctx)
 	if err != nil {
 		return nil, err
 	}
+
+	u.cache.SetRolesCount(pctx, result)
 
 	return &authPb.RolesCountRes{
 		Count: result,

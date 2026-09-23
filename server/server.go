@@ -17,6 +17,8 @@ import (
 	"github.com/watcharaphong99/InwzaShop/modules/middlerware/middlewareHandler"
 	"github.com/watcharaphong99/InwzaShop/modules/middlerware/middlewareRepository"
 	middlewareusecase "github.com/watcharaphong99/InwzaShop/modules/middlerware/middlewareUsecase"
+	"github.com/watcharaphong99/InwzaShop/pkg/jwtauth"
+	"github.com/watcharaphong99/InwzaShop/pkg/rediscon"
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
@@ -25,16 +27,15 @@ type (
 		app        *echo.Echo
 		db         *mongo.Client
 		cfg        *config.Config
+		cache      *rediscon.Client
 		middleware middlewareHandler.MiddlewareHandlerService
 	}
 )
 
-func newMiddleware(cfg *config.Config) middlewareHandler.MiddlewareHandlerService {
-
-	repo := middlewareRepository.NewMiddlewarerepository()
+func newMiddleware(cfg *config.Config, cache *rediscon.Client) middlewareHandler.MiddlewareHandlerService {
+	repo := middlewareRepository.NewMiddlewarerepository(cache, time.Duration(cfg.Jwt.AccessDuration)*time.Second)
 	useCase := middlewareusecase.NewMiddlewareUsecase(repo)
 	return middlewareHandler.NewMiddlewareHandler(cfg, useCase)
-
 }
 
 func (s *server) gracefulShutdown(pctx context.Context, quit <-chan os.Signal) {
@@ -49,6 +50,9 @@ func (s *server) gracefulShutdown(pctx context.Context, quit <-chan os.Signal) {
 	if err := s.app.Shutdown(ctx); err != nil {
 		log.Fatalf("Error: %v", err)
 	}
+	if err := s.cache.Close(); err != nil {
+		log.Printf("Error: redis close: %v", err)
+	}
 }
 
 func (s *server) httpListening() {
@@ -58,15 +62,16 @@ func (s *server) httpListening() {
 }
 
 func Start(pctx context.Context, cfg *config.Config, db *mongo.Client) {
+	cache := rediscon.NewClient(cfg.Redis.Url)
 	s := &server{
 		app:        echo.New(),
 		db:         db,
 		cfg:        cfg,
-		middleware: newMiddleware(cfg),
+		cache:      cache,
+		middleware: newMiddleware(cfg, cache),
 	}
 
-	//Basic MiddleWare
-	//Request TimeOut
+	jwtauth.SetApiKey(cfg.Jwt.ApiSceretKey)
 
 	s.app.Use(middleware.ContextTimeoutWithConfig(middleware.ContextTimeoutConfig{
 		Skipper: middleware.DefaultSkipper,

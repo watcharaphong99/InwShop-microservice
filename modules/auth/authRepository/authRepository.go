@@ -4,16 +4,19 @@ import (
 	"context"
 	"errors"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/watcharaphong99/InwzaShop/modules/auth"
 	playerPb "github.com/watcharaphong99/InwzaShop/modules/player/playerPb"
 
 	"github.com/watcharaphong99/InwzaShop/pkg/grpccon"
+	"github.com/watcharaphong99/InwzaShop/pkg/jwtauth"
 	"github.com/watcharaphong99/InwzaShop/pkg/utils"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
+	"google.golang.org/grpc/status"
 )
 
 type (
@@ -45,17 +48,19 @@ func (r *authRepository) CredentialSearch(pctx context.Context, grpcUrl string, 
 	ctx, cancel := context.WithTimeout(pctx, 30*time.Second)
 	defer cancel()
 
+	jwtauth.SetApiKeyInContext(&ctx)
 	conn, err := grpccon.NewGrpcClient(grpcUrl)
 	if err != nil {
 		log.Printf("Error: gRPC conection failed: %s", err.Error())
 		return nil, errors.New("error: gRpc connection failed")
 	}
+	defer conn.Close()
 
 	result, err := conn.Player().CredentialSearch(ctx, req)
 
 	if err != nil {
 		log.Printf("Error: CredentialSearch failed: %s", err.Error())
-		return nil, errors.New("error: email or password is incorrect")
+		return nil, errors.New(grpcAuthOrCredentialError(err))
 	}
 
 	return result, nil
@@ -65,11 +70,13 @@ func (r *authRepository) FindOnePlayerProfileToRefresh(pctx context.Context, grp
 	ctx, cancel := context.WithTimeout(pctx, 30*time.Second)
 	defer cancel()
 
+	jwtauth.SetApiKeyInContext(&ctx)
 	conn, err := grpccon.NewGrpcClient(grpcUrl)
 	if err != nil {
 		log.Printf("Error: gRPC conection failed: %s", err.Error())
 		return nil, errors.New("error: gRpc connection failed")
 	}
+	defer conn.Close()
 
 	result, err := conn.Player().FindOnePlayerProfileToRefresh(ctx, req)
 
@@ -198,4 +205,15 @@ func (r *authRepository) RolesCount(pctx context.Context) (int64, error) {
 	}
 
 	return count, nil
+}
+
+func grpcAuthOrCredentialError(err error) string {
+	st, ok := status.FromError(err)
+	if ok {
+		msg := st.Message()
+		if strings.Contains(msg, "token") || strings.Contains(msg, "metadata") {
+			return "error: grpc authorization failed"
+		}
+	}
+	return "error: email or password is incorrect"
 }

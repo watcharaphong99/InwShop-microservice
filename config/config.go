@@ -13,6 +13,7 @@ type (
 		App      App
 		Db       Db
 		Jwt      Jwt
+		Redis    Redis
 		Kafka    Kafka
 		Grpc     Grpc
 		Paginate Paginate
@@ -25,6 +26,10 @@ type (
 	}
 
 	Db struct {
+		Url string
+	}
+
+	Redis struct {
 		Url string
 	}
 
@@ -70,6 +75,9 @@ func LoadConfig(path string) Config {
 		},
 		Db: Db{
 			Url: os.Getenv("DB_URL"),
+		},
+		Redis: Redis{
+			Url: os.Getenv("REDIS_URL"),
 		},
 		Jwt: Jwt{
 			AccessSecretKey:  os.Getenv("JWT_ACCESS_SECRET_KEY"),

@@ -24,3 +24,6 @@ inventory
     ./modules/inventory/inventoryPb/inventoryPb.proto
 
   คำสั่ง รัน  go run main.go ./env/dev/.env.auth
+
+
+docker exec inwza-redis redis-cli KEYS 'auth:access:*' ดู redis

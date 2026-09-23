@@ -59,7 +59,7 @@ func (h *playerHttpHandler) FindOnePlayerProfile(c echo.Context) error {
 		return response.ErrResponse(c, http.StatusBadRequest, err.Error())
 	}
 
-	return response.SuccessResponse(c, http.StatusCreated, res)
+	return response.SuccessResponse(c, http.StatusOK, res)
 
 }
 
@@ -72,12 +72,13 @@ func (h *playerHttpHandler) AddPlayerMoney(c echo.Context) error {
 		return response.ErrResponse(c, http.StatusBadRequest, err.Error())
 	}
 
-	if playerId, ok := c.Get("player_id").(string); ok && playerId != "" {
-		req.PlayerId = playerId
+	playerId, ok := c.Get("player_id").(string)
+	if !ok || playerId == "" {
+		return response.ErrResponse(c, http.StatusUnauthorized, "error: player_id is required")
 	}
 
-	req.PlayerId = strings.TrimPrefix(req.PlayerId, "player:")
-	if req.PlayerId == "" {
+	req.PlayerId = formatPlayerId(playerId)
+	if req.PlayerId == "player:" {
 		return response.ErrResponse(c, http.StatusBadRequest, "error: player_id is required")
 	}
 
@@ -92,12 +93,19 @@ func (h *playerHttpHandler) AddPlayerMoney(c echo.Context) error {
 func (h *playerHttpHandler) GetPlayerSavingAccount(c echo.Context) error {
 	ctx := context.Background()
 
-	playerId := strings.TrimPrefix(c.Param("player_id"), "player:")
+	playerId, ok := c.Get("player_id").(string)
+	if !ok || playerId == "" {
+		return response.ErrResponse(c, http.StatusUnauthorized, "error: player_id is required")
+	}
 
-	res, err := h.playerUsecase.GetPlayerSavingAccount(ctx, playerId)
+	res, err := h.playerUsecase.GetPlayerSavingAccount(ctx, formatPlayerId(playerId))
 	if err != nil {
 		return response.ErrResponse(c, http.StatusBadRequest, err.Error())
 	}
 
 	return response.SuccessResponse(c, http.StatusOK, res)
+}
+
+func formatPlayerId(id string) string {
+	return "player:" + strings.TrimPrefix(id, "player:")
 }
