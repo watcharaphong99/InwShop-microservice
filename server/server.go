@@ -61,8 +61,7 @@ func (s *server) httpListening() {
 	}
 }
 
-func Start(pctx context.Context, cfg *config.Config, db *mongo.Client) {
-	cache := rediscon.NewClient(cfg.Redis.Url)
+func Start(pctx context.Context, cfg *config.Config, db *mongo.Client, cache *rediscon.Client) {
 	s := &server{
 		app:        echo.New(),
 		db:         db,

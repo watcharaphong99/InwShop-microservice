@@ -49,6 +49,7 @@ func (r *authRepository) CredentialSearch(pctx context.Context, grpcUrl string, 
 	defer cancel()
 
 	jwtauth.SetApiKeyInContext(&ctx)
+
 	conn, err := grpccon.NewGrpcClient(grpcUrl)
 	if err != nil {
 		log.Printf("Error: gRPC conection failed: %s", err.Error())
