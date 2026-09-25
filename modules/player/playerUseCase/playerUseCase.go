@@ -58,6 +58,9 @@ func (u *playerUsecase) CreatePlayer(pctx context.Context, req *player.CreatePla
 			},
 		},
 	})
+	if err != nil {
+		return nil, err
+	}
 
 	return u.FindOnePlayerProfile(pctx, playerId.Hex())
 

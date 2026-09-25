@@ -132,7 +132,7 @@ func (r *playerRepository) GetPlayerSavingAccount(pctx context.Context, playerId
 	db := r.playerDbConn(ctx)
 	col := db.Collection("player_transactions")
 
-	log.Printf("playerId at Repository", playerId)
+	log.Printf("playerId at Repository: %s", playerId)
 
 	filter := bson.A{
 		bson.D{{"$match", bson.D{{"player_id", playerId}}}},
@@ -157,7 +157,7 @@ func (r *playerRepository) GetPlayerSavingAccount(pctx context.Context, playerId
 
 	cursor, err := col.Aggregate(ctx, filter)
 
-	log.Printf("print cursor", cursor)
+	log.Printf("print cursor: %v", cursor)
 	if err != nil {
 		log.Printf("Error: GetPlayerSavingAccount: %s", err.Error())
 		return nil, errors.New("error: failed to get player saving account")
@@ -188,7 +188,7 @@ func (r *playerRepository) FindOnePlayerCredential(pctx context.Context, email s
 
 	result := new(player.Player)
 
-	log.Printf("email", email)
+	log.Printf("email: %s", email)
 
 	if err := col.FindOne(ctx, bson.M{"email": email}).Decode(result); err != nil {
 

@@ -11,6 +11,7 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 type (
@@ -88,4 +89,56 @@ func (r *itemRepository) FindOneItem(pctx context.Context, itemId string) (*item
 		return nil, errors.New("error: find one item failed")
 	}
 	return result, nil
+}
+
+func (r *itemRepository) FindManyItems(pctx context.Context, filter primitive.D) ([]*item.ItemShowCase, error) {
+	ctx, cancle := context.WithTimeout(pctx, 10*time.Second)
+	defer cancle()
+
+	db := r.itemDbConn(ctx)
+	col := db.Collection("items")
+
+	cursors, err := col.Find(ctx, filter, options.Find().SetSort(bson.D{{"_id", 1}}))
+	if err != nil {
+		log.Printf("Error: FindManyItems failed: %s", err.Error())
+		return make([]*item.ItemShowCase, 0), errors.New("error: find many items failed")
+	}
+
+	results := make([]*item.ItemShowCase, 0)
+
+	for cursors.Next(ctx) {
+		result := new(item.Item)
+
+		if err := cursors.Decode(result); err != nil {
+			log.Printf("Error: FindManyItems failed: %s", err.Error())
+			return make([]*item.ItemShowCase, 0), errors.New("error: find many items failed")
+		}
+
+		results = append(results, &item.ItemShowCase{
+			ItemId:   "item:" + result.Id.Hex(),
+			Title:    result.Title,
+			Price:    result.Price,
+			Damage:   result.Damage,
+			ImageUrl: result.ImageUrl,
+		})
+	}
+
+	return make([]*item.ItemShowCase, 0), nil
+}
+
+func (r *itemRepository) CountItems(pctx context.Context, filter primitive.D) (int64, error) {
+
+	ctx, cancle := context.WithTimeout(pctx, 10*time.Second)
+	defer cancle()
+
+	db := r.itemDbConn(ctx)
+	col := db.Collection("items")
+
+	count, err := col.CountDocuments(ctx, filter)
+	if err != nil {
+		log.Printf("Error: CountItems failed: %s", err.Error())
+		return -1, errors.New("error: count items failed")
+	}
+
+	return count, nil
 }
