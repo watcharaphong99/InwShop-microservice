@@ -17,6 +17,7 @@ type (
 	ItemHttpHandlerService interface {
 		CreateItem(c echo.Context) error
 		FindOneItem(c echo.Context) error
+		FindManyItems(c echo.Context) error
 	}
 
 	itemHttpHandler struct {
@@ -59,6 +60,32 @@ func (h *itemHttpHandler) FindOneItem(c echo.Context) error {
 	itemId := strings.TrimPrefix(c.Param("item_id"), "item:")
 
 	res, err := h.itemUsecase.FindOneItem(ctx, itemId)
+	if err != nil {
+		switch err.Error() {
+		case "error: id is invalid":
+			return response.ErrResponse(c, http.StatusBadRequest, err.Error())
+		case "error: item not found":
+			return response.ErrResponse(c, http.StatusNotFound, err.Error())
+		default:
+			return response.ErrResponse(c, http.StatusInternalServerError, err.Error())
+		}
+	}
+
+	return response.SuccessResponse(c, http.StatusOK, res)
+}
+
+func (h *itemHttpHandler) FindManyItems(c echo.Context) error {
+	ctx := context.Background()
+
+	wrapper := request.ContextWrapper(c)
+
+	req := new(item.ItemSearchReq)
+
+	if err := wrapper.Bind(req); err != nil {
+		return response.ErrResponse(c, http.StatusBadRequest, err.Error())
+	}
+
+	res, err := h.itemUsecase.FindManyItems(ctx, h.cfg.Paginate.ItemNextPageBasedUrl, req)
 	if err != nil {
 		switch err.Error() {
 		case "error: id is invalid":

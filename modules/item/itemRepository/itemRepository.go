@@ -19,6 +19,8 @@ type (
 		IsUniqueItem(pctx context.Context, title string) (bool, error)
 		InsertOneItem(pctx context.Context, req *item.Item) (primitive.ObjectID, error)
 		FindOneItem(pctx context.Context, itemId string) (*item.Item, error)
+		CountItems(pctx context.Context, filter primitive.D) (int64, error)
+		FindManyItems(pctx context.Context, filter primitive.D, opts []*options.FindOptions) ([]*item.ItemShowCase, error)
 	}
 
 	itemRepository struct {
@@ -91,18 +93,19 @@ func (r *itemRepository) FindOneItem(pctx context.Context, itemId string) (*item
 	return result, nil
 }
 
-func (r *itemRepository) FindManyItems(pctx context.Context, filter primitive.D) ([]*item.ItemShowCase, error) {
+func (r *itemRepository) FindManyItems(pctx context.Context, filter primitive.D, opts []*options.FindOptions) ([]*item.ItemShowCase, error) {
 	ctx, cancle := context.WithTimeout(pctx, 10*time.Second)
 	defer cancle()
 
 	db := r.itemDbConn(ctx)
 	col := db.Collection("items")
 
-	cursors, err := col.Find(ctx, filter, options.Find().SetSort(bson.D{{"_id", 1}}))
+	cursors, err := col.Find(ctx, filter, opts...)
 	if err != nil {
 		log.Printf("Error: FindManyItems failed: %s", err.Error())
 		return make([]*item.ItemShowCase, 0), errors.New("error: find many items failed")
 	}
+	defer cursors.Close(ctx)
 
 	results := make([]*item.ItemShowCase, 0)
 
@@ -123,7 +126,12 @@ func (r *itemRepository) FindManyItems(pctx context.Context, filter primitive.D)
 		})
 	}
 
-	return make([]*item.ItemShowCase, 0), nil
+	if err := cursors.Err(); err != nil {
+		log.Printf("Error: FindManyItems failed: %s", err.Error())
+		return make([]*item.ItemShowCase, 0), errors.New("error: find many items failed")
+	}
+
+	return results, nil
 }
 
 func (r *itemRepository) CountItems(pctx context.Context, filter primitive.D) (int64, error) {
