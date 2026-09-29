@@ -85,20 +85,20 @@ func (u *itemUsecase) FindManyItems(pctx context.Context, basePaginateUrl string
 		if err != nil {
 			return nil, err
 		}
-		findItemsFilter = append(findItemsFilter, bson.E{"_id", bson.D{{"$gt", startId}}})
+		findItemsFilter = append(findItemsFilter, bson.E{Key: "_id", Value: bson.D{{Key: "$gt", Value: startId}}})
 	}
 
 	if req.Title != "" {
 		titleRegex := primitive.Regex{Pattern: regexp.QuoteMeta(req.Title), Options: "i"}
-		findItemsFilter = append(findItemsFilter, bson.E{"title", titleRegex})
-		countItemsFilter = append(countItemsFilter, bson.E{"title", titleRegex})
+		findItemsFilter = append(findItemsFilter, bson.E{Key: "title", Value: titleRegex})
+		countItemsFilter = append(countItemsFilter, bson.E{Key: "title", Value: titleRegex})
 	}
 
-	findItemsFilter = append(findItemsFilter, bson.E{"usage_status", true})
-	countItemsFilter = append(countItemsFilter, bson.E{"usage_status", true})
+	findItemsFilter = append(findItemsFilter, bson.E{Key: "usage_status", Value: true})
+	countItemsFilter = append(countItemsFilter, bson.E{Key: "usage_status", Value: true})
 
 	//Options
-	findItemsOpts = append(findItemsOpts, options.Find().SetSort(bson.D{{"_id", 1}}))
+	findItemsOpts = append(findItemsOpts, options.Find().SetSort(bson.D{{Key: "_id", Value: 1}}))
 	findItemsOpts = append(findItemsOpts, options.Find().SetLimit(int64(req.Limit)))
 
 	//Find

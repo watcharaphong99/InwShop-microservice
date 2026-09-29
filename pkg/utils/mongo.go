@@ -12,8 +12,9 @@ func ConvertToObjectId(id string) primitive.ObjectID {
 }
 
 func ParseObjectId(id string) (primitive.ObjectID, error) {
-	if !primitive.IsValidObjectID(id) {
+	objectId, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
 		return primitive.NilObjectID, errors.New("error: id is invalid")
 	}
-	return primitive.ObjectIDFromHex(id)
+	return objectId, nil
 }

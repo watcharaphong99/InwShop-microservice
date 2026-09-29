@@ -1,7 +1,6 @@
 package playerHandler
 
 import (
-	"context"
 	"net/http"
 	"strings"
 
@@ -32,7 +31,7 @@ func NewPlayerHttpHandlerService(cfg *config.Config, playerUsecase playerUsecase
 }
 
 func (h *playerHttpHandler) CreatePlayer(c echo.Context) error {
-	ctx := context.Background()
+	ctx := c.Request().Context()
 	wrapper := request.ContextWrapper(c)
 	req := new(player.CreatePlayerReq)
 
@@ -50,7 +49,7 @@ func (h *playerHttpHandler) CreatePlayer(c echo.Context) error {
 }
 
 func (h *playerHttpHandler) FindOnePlayerProfile(c echo.Context) error {
-	ctx := context.Background()
+	ctx := c.Request().Context()
 
 	playerId := strings.TrimPrefix(c.Param("player_id"), "player:")
 
@@ -64,7 +63,7 @@ func (h *playerHttpHandler) FindOnePlayerProfile(c echo.Context) error {
 }
 
 func (h *playerHttpHandler) AddPlayerMoney(c echo.Context) error {
-	ctx := context.Background()
+	ctx := c.Request().Context()
 	wrapper := request.ContextWrapper(c)
 
 	req := new(player.CreatePlayerTransactionReq)
@@ -91,7 +90,7 @@ func (h *playerHttpHandler) AddPlayerMoney(c echo.Context) error {
 }
 
 func (h *playerHttpHandler) GetPlayerSavingAccount(c echo.Context) error {
-	ctx := context.Background()
+	ctx := c.Request().Context()
 
 	playerId, ok := c.Get("player_id").(string)
 	if !ok || playerId == "" {

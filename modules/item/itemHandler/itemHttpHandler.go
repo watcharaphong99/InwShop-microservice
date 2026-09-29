@@ -1,7 +1,6 @@
 package itemHandler
 
 import (
-	"context"
 	"net/http"
 	"strings"
 
@@ -31,7 +30,7 @@ func NewItemHttpHandler(cfg *config.Config, itemUsecase itemUsecase.ItemUsecaseS
 }
 
 func (h *itemHttpHandler) CreateItem(c echo.Context) error {
-	ctx := context.Background()
+	ctx := c.Request().Context()
 
 	wrappers := request.ContextWrapper(c)
 
@@ -55,7 +54,7 @@ func (h *itemHttpHandler) CreateItem(c echo.Context) error {
 }
 
 func (h *itemHttpHandler) FindOneItem(c echo.Context) error {
-	ctx := context.Background()
+	ctx := c.Request().Context()
 
 	itemId := strings.TrimPrefix(c.Param("item_id"), "item:")
 
@@ -75,7 +74,7 @@ func (h *itemHttpHandler) FindOneItem(c echo.Context) error {
 }
 
 func (h *itemHttpHandler) FindManyItems(c echo.Context) error {
-	ctx := context.Background()
+	ctx := c.Request().Context()
 
 	wrapper := request.ContextWrapper(c)
 

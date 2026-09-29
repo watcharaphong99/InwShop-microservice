@@ -1,7 +1,6 @@
 package authHandler
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 
@@ -31,7 +30,7 @@ func NewAuthHandlerService(config *config.Config, authUsecase authUsecase.AuthUs
 }
 
 func (h *authHttpHandler) Login(c echo.Context) error {
-	ctx := context.Background()
+	ctx := c.Request().Context()
 
 	wrapper := request.ContextWrapper(c)
 
@@ -50,7 +49,7 @@ func (h *authHttpHandler) Login(c echo.Context) error {
 }
 
 func (h *authHttpHandler) RefreshToken(c echo.Context) error {
-	ctx := context.Background()
+	ctx := c.Request().Context()
 
 	wrapper := request.ContextWrapper(c)
 
@@ -69,7 +68,7 @@ func (h *authHttpHandler) RefreshToken(c echo.Context) error {
 }
 
 func (h *authHttpHandler) Logout(c echo.Context) error {
-	ctx := context.Background()
+	ctx := c.Request().Context()
 
 	wrapper := request.ContextWrapper(c)
 
