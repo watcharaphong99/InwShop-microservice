@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"log"
 	"strconv"
 	"time"
@@ -15,6 +16,8 @@ const (
 	RolesCountKey     = "auth:roles:count"
 	RolesCountTTL     = 1 * time.Hour
 	accessTokenPrefix = "auth:access:"
+	ItemTTL           = 10 * time.Minute
+	itemPrefix        = "item:one:"
 )
 
 type Client struct {
@@ -56,8 +59,90 @@ func AccessTokenKey(accessToken string) string {
 	return accessTokenPrefix + hex.EncodeToString(sum[:])
 }
 
+func ItemKey(itemId string) string {
+	return itemPrefix + itemId
+}
+
 func (c *Client) enabled() bool {
 	return c != nil && c.rdb != nil
+}
+
+func (c *Client) GetJSON(ctx context.Context, key string, dest any) bool {
+	if !c.enabled() {
+		return false
+	}
+	val, err := c.rdb.Get(ctx, key).Bytes()
+	if err != nil {
+		if err != redis.Nil {
+			log.Printf("redis: get %s failed: %s", key, err.Error())
+		}
+		return false
+	}
+	if err := json.Unmarshal(val, dest); err != nil {
+		log.Printf("redis: decode %s failed: %s", key, err.Error())
+		return false
+	}
+	return true
+}
+
+func (c *Client) SetJSON(ctx context.Context, key string, value any, ttl time.Duration) {
+	if !c.enabled() || ttl <= 0 {
+		return
+	}
+	val, err := json.Marshal(value)
+	if err != nil {
+		log.Printf("redis: encode %s failed: %s", key, err.Error())
+		return
+	}
+	if err := c.rdb.Set(ctx, key, val, ttl).Err(); err != nil {
+		log.Printf("redis: set %s failed: %s", key, err.Error())
+	}
+}
+
+// MGetBytes returns one entry per key, nil for a miss.
+func (c *Client) MGetBytes(ctx context.Context, keys ...string) [][]byte {
+	out := make([][]byte, len(keys))
+	if !c.enabled() || len(keys) == 0 {
+		return out
+	}
+	vals, err := c.rdb.MGet(ctx, keys...).Result()
+	if err != nil {
+		log.Printf("redis: mget failed: %s", err.Error())
+		return out
+	}
+	for i, v := range vals {
+		if s, ok := v.(string); ok {
+			out[i] = []byte(s)
+		}
+	}
+	return out
+}
+
+func (c *Client) SetManyJSON(ctx context.Context, values map[string]any, ttl time.Duration) {
+	if !c.enabled() || ttl <= 0 || len(values) == 0 {
+		return
+	}
+	pipe := c.rdb.Pipeline()
+	for key, value := range values {
+		val, err := json.Marshal(value)
+		if err != nil {
+			log.Printf("redis: encode %s failed: %s", key, err.Error())
+			continue
+		}
+		pipe.Set(ctx, key, val, ttl)
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		log.Printf("redis: set many failed: %s", err.Error())
+	}
+}
+
+func (c *Client) Del(ctx context.Context, keys ...string) {
+	if !c.enabled() || len(keys) == 0 {
+		return
+	}
+	if err := c.rdb.Del(ctx, keys...).Err(); err != nil {
+		log.Printf("redis: del %v failed: %s", keys, err.Error())
+	}
 }
 
 func (c *Client) HasAccessToken(ctx context.Context, accessToken string) bool {

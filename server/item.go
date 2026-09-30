@@ -12,7 +12,7 @@ import (
 )
 
 func (s *server) itemService() {
-	repo := itemRepository.NewItemRepository(s.db)
+	repo := itemRepository.NewItemRepository(s.db, s.cache)
 	usecase := itemUsecase.NewItemUsecaseService(repo)
 	httpHandler := itemHandler.NewItemHttpHandler(s.cfg, usecase)
 	grpcHandler := itemHandler.NewItemGrpcHandler(usecase)
@@ -36,5 +36,7 @@ func (s *server) itemService() {
 	item.POST("/item", s.middleware.JwtAuthorization(s.middleware.RbacAuthorization(httpHandler.CreateItem, []int{1, 0})))
 	item.GET("/item/:item_id", httpHandler.FindOneItem)
 	item.GET("/item", httpHandler.FindManyItems)
+	item.PATCH("/item/:item_id", s.middleware.JwtAuthorization(s.middleware.RbacAuthorization(httpHandler.EditItem, []int{1, 0})))
+	item.PATCH("/item/:item_id/is-activated", s.middleware.JwtAuthorization(s.middleware.RbacAuthorization(httpHandler.EnableOrDisableItem, []int{1, 0})))
 
 }

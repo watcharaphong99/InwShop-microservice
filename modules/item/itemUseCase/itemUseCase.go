@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
 	"regexp"
 	"strings"
 
 	"github.com/watcharaphong99/InwzaShop/modules/item"
+	itemPb "github.com/watcharaphong99/InwzaShop/modules/item/itemPb"
 	"github.com/watcharaphong99/InwzaShop/modules/item/itemRepository"
 	"github.com/watcharaphong99/InwzaShop/modules/models"
 	"github.com/watcharaphong99/InwzaShop/pkg/utils"
@@ -22,6 +24,10 @@ type (
 		CreateItem(pctx context.Context, req *item.CreateItemReq) (*item.ItemShowCase, error)
 		FindOneItem(pctx context.Context, itemId string) (*item.ItemShowCase, error)
 		FindManyItems(pctx context.Context, basePaginateUrl string, req *item.ItemSearchReq) (*models.PaginateRes, error)
+		EditItem(pctx context.Context, itemId string, req *item.ItemUpdateReq) (*item.ItemShowCase, error)
+		// EnableOrDisableItem(pctx context.Context, itemId string) (bool, error)
+		EnableOrDisableItem(pctx context.Context, itemId string, usageStatus bool) (bool, error)
+		FindItemsInIds(pctx context.Context, req *itemPb.FindItemsInIdsReq) (*itemPb.FindItemsInIdsRes, error)
 	}
 
 	itemUsecase struct {
@@ -137,4 +143,87 @@ func (u *itemUsecase) FindManyItems(pctx context.Context, basePaginateUrl string
 	}
 
 	return res, nil
+}
+
+func (u *itemUsecase) EditItem(pctx context.Context, itemId string, req *item.ItemUpdateReq) (*item.ItemShowCase, error) {
+	current, err := u.itemRepository.FindOneItem(pctx, itemId)
+	if err != nil {
+		return nil, err
+	}
+
+	updateReq := bson.M{}
+
+	if req.Title != "" && req.Title != current.Title {
+		isUnique, err := u.itemRepository.IsUniqueItem(pctx, req.Title)
+		if err != nil {
+			return nil, err
+		}
+		if !isUnique {
+			log.Println("Error: EditItem failed: title is already exist")
+			return nil, errors.New("error: this title is already exist")
+		}
+
+		updateReq["title"] = req.Title
+	}
+
+	if req.ImageUrl != "" {
+		updateReq["image_url"] = req.ImageUrl
+	}
+
+	if req.Damage != nil {
+		updateReq["damage"] = *req.Damage
+	}
+
+	if req.Price != nil {
+		updateReq["price"] = *req.Price
+	}
+
+	if len(updateReq) == 0 {
+		return nil, errors.New("error: no fields to update")
+	}
+
+	updateReq["updated_at"] = utils.LocalTime()
+
+	if err := u.itemRepository.UpdateOneItem(pctx, itemId, updateReq); err != nil {
+		return nil, err
+	}
+
+	return u.FindOneItem(pctx, itemId)
+}
+
+func (u *itemUsecase) EnableOrDisableItem(pctx context.Context, itemId string, usageStatus bool) (bool, error) {
+	if err := u.itemRepository.EnableOrDisableItem(pctx, itemId, usageStatus); err != nil {
+		return false, err
+	}
+
+	return usageStatus, nil
+}
+
+func (u *itemUsecase) FindItemsInIds(pctx context.Context, req *itemPb.FindItemsInIdsReq) (*itemPb.FindItemsInIdsRes, error) {
+	objectIds := make([]primitive.ObjectID, 0, len(req.Ids))
+	for _, id := range req.Ids {
+		objectId, err := utils.ParseObjectId(strings.TrimPrefix(id, "item:"))
+		if err != nil {
+			return nil, err
+		}
+		objectIds = append(objectIds, objectId)
+	}
+
+	results, err := u.itemRepository.FindItemsInIds(pctx, objectIds)
+	if err != nil {
+		return nil, err
+	}
+
+	items := make([]*itemPb.Item, 0, len(results))
+	for _, result := range results {
+		items = append(items, &itemPb.Item{
+			Id:       "item:" + result.Id.Hex(),
+			Title:    result.Title,
+			Price:    result.Price,
+			ImageUrl: result.ImageUrl,
+			Damage:   int32(result.Damage),
+		})
+	}
+
+	return &itemPb.FindItemsInIdsRes{Items: items}, nil
 }

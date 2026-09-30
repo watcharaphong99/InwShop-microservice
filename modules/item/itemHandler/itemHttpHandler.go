@@ -1,6 +1,7 @@
 package itemHandler
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -17,6 +18,8 @@ type (
 		CreateItem(c echo.Context) error
 		FindOneItem(c echo.Context) error
 		FindManyItems(c echo.Context) error
+		EditItem(c echo.Context) error
+		EnableOrDisableItem(c echo.Context) error
 	}
 
 	itemHttpHandler struct {
@@ -97,4 +100,65 @@ func (h *itemHttpHandler) FindManyItems(c echo.Context) error {
 	}
 
 	return response.SuccessResponse(c, http.StatusOK, res)
+}
+
+func (h *itemHttpHandler) EditItem(c echo.Context) error {
+	ctx := c.Request().Context()
+
+	itemId := strings.TrimPrefix(c.Param("item_id"), "item:")
+
+	wrapper := request.ContextWrapper(c)
+
+	req := new(item.ItemUpdateReq)
+
+	if err := wrapper.Bind(req); err != nil {
+		return response.ErrResponse(c, http.StatusBadRequest, err.Error())
+	}
+
+	res, err := h.itemUsecase.EditItem(ctx, itemId, req)
+
+	if err != nil {
+		switch err.Error() {
+		case "error: id is invalid", "error: no fields to update":
+			return response.ErrResponse(c, http.StatusBadRequest, err.Error())
+		case "error: item not found":
+			return response.ErrResponse(c, http.StatusNotFound, err.Error())
+		case "error: this title is already exist":
+			return response.ErrResponse(c, http.StatusConflict, err.Error())
+		default:
+			return response.ErrResponse(c, http.StatusInternalServerError, err.Error())
+		}
+	}
+
+	return response.SuccessResponse(c, http.StatusOK, res)
+}
+
+func (h *itemHttpHandler) EnableOrDisableItem(c echo.Context) error {
+	ctx := c.Request().Context()
+
+	itemId := strings.TrimPrefix(c.Param("item_id"), "item:")
+
+	wrapper := request.ContextWrapper(c)
+
+	req := new(item.EnableOrDisableItemReq)
+
+	if err := wrapper.Bind(req); err != nil {
+		return response.ErrResponse(c, http.StatusBadRequest, err.Error())
+	}
+
+	res, err := h.itemUsecase.EnableOrDisableItem(ctx, itemId, *req.UsageStatus)
+	if err != nil {
+		switch err.Error() {
+		case "error: id is invalid":
+			return response.ErrResponse(c, http.StatusBadRequest, err.Error())
+		case "error: item not found":
+			return response.ErrResponse(c, http.StatusNotFound, err.Error())
+		default:
+			return response.ErrResponse(c, http.StatusInternalServerError, err.Error())
+		}
+	}
+
+	return response.SuccessResponse(c, http.StatusOK, map[string]any{
+		"message": fmt.Sprintf("item_id: %s usage_status changed to: %v", itemId, res),
+	})
 }
