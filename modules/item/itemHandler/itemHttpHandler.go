@@ -20,6 +20,7 @@ type (
 		FindManyItems(c echo.Context) error
 		EditItem(c echo.Context) error
 		EnableOrDisableItem(c echo.Context) error
+		DeleteItem(c echo.Context) error
 	}
 
 	itemHttpHandler struct {
@@ -160,5 +161,28 @@ func (h *itemHttpHandler) EnableOrDisableItem(c echo.Context) error {
 
 	return response.SuccessResponse(c, http.StatusOK, map[string]any{
 		"message": fmt.Sprintf("item_id: %s usage_status changed to: %v", itemId, res),
+	})
+}
+
+func (h *itemHttpHandler) DeleteItem(c echo.Context) error {
+	ctx := c.Request().Context()
+
+	itemId := strings.TrimPrefix(c.Param("item_id"), "item:")
+
+	result, err := h.itemUsecase.DeleteItem(ctx, itemId)
+
+	if err != nil {
+		switch err.Error() {
+		case "error: id is invalid":
+			return response.ErrResponse(c, http.StatusBadRequest, err.Error())
+		case "error: item not found":
+			return response.ErrResponse(c, http.StatusNotFound, err.Error())
+		default:
+			return response.ErrResponse(c, http.StatusInternalServerError, err.Error())
+		}
+	}
+
+	return response.SuccessResponse(c, http.StatusOK, &response.MsgResponse{
+		Message: fmt.Sprintf("Deleted count: %d", result),
 	})
 }

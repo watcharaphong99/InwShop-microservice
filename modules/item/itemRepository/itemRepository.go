@@ -26,6 +26,7 @@ type (
 		FindManyItems(pctx context.Context, filter primitive.D, opts []*options.FindOptions) ([]*item.ItemShowCase, error)
 		UpdateOneItem(pctx context.Context, itemId string, req primitive.M) error
 		EnableOrDisableItem(pctx context.Context, itemId string, isActive bool) error
+		DeleteOneItem(pctx context.Context, itemId string) (int64, error)
 	}
 
 	itemRepository struct {
@@ -291,4 +292,31 @@ func (r *itemRepository) EnableOrDisableItem(pctx context.Context, itemId string
 	r.cache.Del(ctx, rediscon.ItemKey(objectId.Hex()))
 
 	return nil
+}
+
+func (r *itemRepository) DeleteOneItem(pctx context.Context, itemId string) (int64, error) {
+	ctx, cancle := context.WithTimeout(pctx, 10*time.Second)
+	defer cancle()
+
+	objectId, err := utils.ParseObjectId(itemId)
+	if err != nil {
+		return 0, err
+	}
+
+	db := r.itemDbConn(ctx)
+	col := db.Collection("items")
+
+	result, err := col.DeleteOne(ctx, bson.M{"_id": objectId})
+	if err != nil {
+		log.Printf("Error: DeleteOneItem failed: %s", err.Error())
+		return 0, errors.New("error: delete one item failed")
+	}
+
+	if result.DeletedCount == 0 {
+		return 0, errors.New("error: item not found")
+	}
+
+	r.cache.Del(ctx, rediscon.ItemKey(objectId.Hex()))
+
+	return result.DeletedCount, nil
 }

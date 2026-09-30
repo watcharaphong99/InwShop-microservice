@@ -25,9 +25,10 @@ type (
 		FindOneItem(pctx context.Context, itemId string) (*item.ItemShowCase, error)
 		FindManyItems(pctx context.Context, basePaginateUrl string, req *item.ItemSearchReq) (*models.PaginateRes, error)
 		EditItem(pctx context.Context, itemId string, req *item.ItemUpdateReq) (*item.ItemShowCase, error)
-		// EnableOrDisableItem(pctx context.Context, itemId string) (bool, error)
 		EnableOrDisableItem(pctx context.Context, itemId string, usageStatus bool) (bool, error)
-		FindItemsInIds(pctx context.Context, req *itemPb.FindItemsInIdsReq) (*itemPb.FindItemsInIdsRes, error)
+		// FindItemsInIds(pctx context.Context, req *itemPb.FindItemsInIdsReq) (*itemPb.FindItemsInIdsRes, error)
+		DeleteItem(pctx context.Context, itemId string) (int64, error)
+		FindItemInIds(pctx context.Context, req *itemPb.FindItemsInIdsReq) (*itemPb.FindItemsInIdsRes, error)
 	}
 
 	itemUsecase struct {
@@ -199,31 +200,74 @@ func (u *itemUsecase) EnableOrDisableItem(pctx context.Context, itemId string, u
 	return usageStatus, nil
 }
 
-func (u *itemUsecase) FindItemsInIds(pctx context.Context, req *itemPb.FindItemsInIdsReq) (*itemPb.FindItemsInIdsRes, error) {
-	objectIds := make([]primitive.ObjectID, 0, len(req.Ids))
-	for _, id := range req.Ids {
-		objectId, err := utils.ParseObjectId(strings.TrimPrefix(id, "item:"))
-		if err != nil {
-			return nil, err
-		}
-		objectIds = append(objectIds, objectId)
+// func (u *itemUsecase) FindItemsInIds(pctx context.Context, req *itemPb.FindItemsInIdsReq) (*itemPb.FindItemsInIdsRes, error) {
+// 	objectIds := make([]primitive.ObjectID, 0, len(req.Ids))
+// 	for _, id := range req.Ids {
+// 		objectId, err := utils.ParseObjectId(strings.TrimPrefix(id, "item:"))
+// 		if err != nil {
+// 			return nil, err
+// 		}
+// 		objectIds = append(objectIds, objectId)
+// 	}
+
+// 	results, err := u.itemRepository.FindItemsInIds(pctx, objectIds)
+// 	if err != nil {
+// 		return nil, err
+// 	}
+
+// 	items := make([]*itemPb.Item, 0, len(results))
+// 	for _, result := range results {
+// 		items = append(items, &itemPb.Item{
+// 			Id:       "item:" + result.Id.Hex(),
+// 			Title:    result.Title,
+// 			Price:    result.Price,
+// 			ImageUrl: result.ImageUrl,
+// 			Damage:   int32(result.Damage),
+// 		})
+// 	}
+
+// 	return &itemPb.FindItemsInIdsRes{Items: items}, nil
+// }
+
+func (u *itemUsecase) DeleteItem(pctx context.Context, itemId string) (int64, error) {
+
+	result, err := u.itemRepository.DeleteOneItem(pctx, itemId)
+	if err != nil {
+		return 0, err
 	}
 
-	results, err := u.itemRepository.FindItemsInIds(pctx, objectIds)
+	return result, nil
+}
+
+// todo
+func (u *itemUsecase) FindItemInIds(pctx context.Context, req *itemPb.FindItemsInIdsReq) (*itemPb.FindItemsInIdsRes, error) {
+	filter := bson.D{}
+
+	objectIds := make([]primitive.ObjectID, 0)
+	for _, itemId := range req.Ids {
+		objectIds = append(objectIds, utils.ConvertToObjectId(strings.TrimPrefix(itemId, "item:")))
+	}
+
+	filter = append(filter, bson.E{Key: "_id", Value: bson.D{{Key: "$in", Value: objectIds}}})
+	filter = append(filter, bson.E{Key: "usage_status", Value: true})
+
+	results, err := u.itemRepository.FindManyItems(pctx, filter, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	items := make([]*itemPb.Item, 0, len(results))
+	resultsToRes := make([]*itemPb.Item, 0)
 	for _, result := range results {
-		items = append(items, &itemPb.Item{
-			Id:       "item:" + result.Id.Hex(),
+		resultsToRes = append(resultsToRes, &itemPb.Item{
+			Id:       result.ItemId,
 			Title:    result.Title,
 			Price:    result.Price,
-			ImageUrl: result.ImageUrl,
 			Damage:   int32(result.Damage),
+			ImageUrl: result.ImageUrl,
 		})
 	}
 
-	return &itemPb.FindItemsInIdsRes{Items: items}, nil
+	return &itemPb.FindItemsInIdsRes{
+		Items: resultsToRes,
+	}, nil
 }
