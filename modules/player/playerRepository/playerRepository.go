@@ -34,7 +34,7 @@ func NewPlayerRepository(db *mongo.Client) PlayerRepositoryService {
 	return &playerRepository{db: db}
 }
 
-func (r *playerRepository) playerDbConn(pctx context.Context) *mongo.Database {
+func (r *playerRepository) playerDbConn() *mongo.Database {
 	return r.db.Database("player_db")
 }
 
@@ -42,7 +42,7 @@ func (r *playerRepository) IsUniquePlayer(pctx context.Context, email, username 
 	ctx, cancle := context.WithTimeout(pctx, 10*time.Second)
 	defer cancle()
 
-	db := r.playerDbConn(ctx)
+	db := r.playerDbConn()
 	col := db.Collection("players")
 
 	player := new(player.Player)
@@ -63,7 +63,7 @@ func (r *playerRepository) InsertOnePlayer(pctx context.Context, req *player.Pla
 	ctx, cancel := context.WithTimeout(pctx, 10*time.Second)
 	defer cancel()
 
-	db := r.playerDbConn(ctx)
+	db := r.playerDbConn()
 	col := db.Collection("players")
 
 	playerId, err := col.InsertOne(ctx, req)
@@ -80,7 +80,7 @@ func (r *playerRepository) FindOnePlayerProfine(pctx context.Context, playerId s
 	ctx, cancle := context.WithTimeout(pctx, 10*time.Second)
 	defer cancle()
 
-	db := r.playerDbConn(ctx)
+	db := r.playerDbConn()
 	col := db.Collection("players")
 
 	result := new(player.PlayerProfileBson)
@@ -112,7 +112,7 @@ func (r *playerRepository) InsertOnePlayerTranscation(pctx context.Context, req 
 	ctx, cancle := context.WithTimeout(pctx, 10*time.Second)
 	defer cancle()
 
-	db := r.playerDbConn(ctx)
+	db := r.playerDbConn()
 	col := db.Collection("player_transactions")
 
 	result, err := col.InsertOne(ctx, req)
@@ -129,27 +129,27 @@ func (r *playerRepository) GetPlayerSavingAccount(pctx context.Context, playerId
 	ctx, cancle := context.WithTimeout(pctx, 10*time.Second)
 	defer cancle()
 
-	db := r.playerDbConn(ctx)
+	db := r.playerDbConn()
 	col := db.Collection("player_transactions")
 
 	log.Printf("playerId at Repository: %s", playerId)
 
 	filter := bson.A{
-		bson.D{{"$match", bson.D{{"player_id", playerId}}}},
+		bson.D{{Key: "$match", Value: bson.D{{Key: "player_id", Value: playerId}}}},
 		bson.D{
-			{"$group",
-				bson.D{
-					{"_id", "$player_id"},
-					{"balance", bson.D{{"$sum", "$amount"}}},
+			{Key: "$group",
+				Value: bson.D{
+					{Key: "_id", Value: "$player_id"},
+					{Key: "balance", Value: bson.D{{Key: "$sum", Value: "$amount"}}},
 				},
 			},
 		},
 		bson.D{
-			{"$project",
-				bson.D{
-					{"player_id", "$_id"},
-					{"_id", 0},
-					{"balance", 1},
+			{Key: "$project",
+				Value: bson.D{
+					{Key: "player_id", Value: "$_id"},
+					{Key: "_id", Value: 0},
+					{Key: "balance", Value: 1},
 				},
 			},
 		},
@@ -183,7 +183,7 @@ func (r *playerRepository) FindOnePlayerCredential(pctx context.Context, email s
 	ctx, cancle := context.WithTimeout(pctx, 10*time.Second)
 	defer cancle()
 
-	db := r.playerDbConn(ctx)
+	db := r.playerDbConn()
 	col := db.Collection("players")
 
 	result := new(player.Player)
@@ -203,7 +203,7 @@ func (r *playerRepository) FindOnePlayerProfileTokenRefresh(pctx context.Context
 	ctx, cancle := context.WithTimeout(pctx, 10*time.Second)
 	defer cancle()
 
-	db := r.playerDbConn(ctx)
+	db := r.playerDbConn()
 	col := db.Collection("players")
 
 	result := new(player.Player)

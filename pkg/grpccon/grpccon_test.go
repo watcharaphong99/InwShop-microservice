@@ -6,7 +6,9 @@ import (
 
 	"github.com/watcharaphong99/InwzaShop/pkg/jwtauth"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 func TestUnaryAuthorizationAcceptsApiKey(t *testing.T) {
@@ -38,6 +40,9 @@ func TestUnaryAuthorizationRejectsAccessTokenSubject(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for access-token subject")
 	}
+	if status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("code = %v, want Unauthenticated", status.Code(err))
+	}
 }
 
 func TestUnaryAuthorizationRejectsMissingMetadata(t *testing.T) {
@@ -47,5 +52,8 @@ func TestUnaryAuthorizationRejectsMissingMetadata(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error for missing metadata")
+	}
+	if status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("code = %v, want Unauthenticated", status.Code(err))
 	}
 }

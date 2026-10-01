@@ -1,8 +1,6 @@
 package paymentRepository
 
 import (
-	"context"
-
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
@@ -18,6 +16,6 @@ func NewPaymentRepository(db *mongo.Client) PaymentRepositoryService {
 	return &paymentRepository{db: db}
 }
 
-func (r *paymentRepository) paymentDbConn(pctx context.Context) *mongo.Database {
+func (r *paymentRepository) paymentDbConn() *mongo.Database {
 	return r.db.Database("payment_db")
 }

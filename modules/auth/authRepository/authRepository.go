@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log"
-	"strings"
 	"time"
 
 	"github.com/watcharaphong99/InwzaShop/modules/auth"
@@ -16,6 +15,7 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
@@ -40,7 +40,7 @@ func NewRepository(db *mongo.Client) AuthRepositoryService {
 	return &authRepository{db: db}
 }
 
-func (r *authRepository) authDbConn(pctx context.Context) *mongo.Database {
+func (r *authRepository) authDbConn() *mongo.Database {
 	return r.db.Database("auth_db")
 }
 
@@ -93,7 +93,7 @@ func (r *authRepository) InsertOnePlayerCredential(pctx context.Context, req *au
 	ctx, cancle := context.WithTimeout(pctx, 10*time.Second)
 	defer cancle()
 
-	db := r.authDbConn(ctx)
+	db := r.authDbConn()
 	col := db.Collection("auth")
 
 	result, err := col.InsertOne(ctx, req)
@@ -109,7 +109,7 @@ func (r *authRepository) FindOnePlayerCredential(pctx context.Context, credentia
 	ctx, cancel := context.WithTimeout(pctx, 10*time.Second)
 	defer cancel()
 
-	db := r.authDbConn(ctx)
+	db := r.authDbConn()
 	col := db.Collection("auth")
 
 	result := new(auth.Credential)
@@ -126,7 +126,7 @@ func (r *authRepository) UpdateOnePlayerCredential(pctx context.Context, credent
 	ctx, cancel := context.WithTimeout(pctx, 10*time.Second)
 	defer cancel()
 
-	db := r.authDbConn(ctx)
+	db := r.authDbConn()
 	col := db.Collection("auth")
 
 	result, err := col.UpdateOne(
@@ -161,7 +161,7 @@ func (r *authRepository) DeleteOnePlayerCredential(pctx context.Context, credent
 		return 0, errors.New("error: credential id is invalid")
 	}
 
-	db := r.authDbConn(ctx)
+	db := r.authDbConn()
 	col := db.Collection("auth")
 
 	result, err := col.DeleteOne(ctx, bson.M{"_id": objectId})
@@ -180,7 +180,7 @@ func (r *authRepository) FindOneAccessToken(pctx context.Context, accessToken st
 	ctx, cancel := context.WithTimeout(pctx, 10*time.Second)
 	defer cancel()
 
-	db := r.authDbConn(ctx)
+	db := r.authDbConn()
 	col := db.Collection("auth")
 
 	credential := new(auth.Credential)
@@ -196,7 +196,7 @@ func (r *authRepository) RolesCount(pctx context.Context) (int64, error) {
 	ctx, cancel := context.WithTimeout(pctx, 10*time.Second)
 	defer cancel()
 
-	db := r.authDbConn(ctx)
+	db := r.authDbConn()
 	col := db.Collection("roles")
 
 	count, err := col.CountDocuments(ctx, bson.M{})
@@ -211,8 +211,8 @@ func (r *authRepository) RolesCount(pctx context.Context) (int64, error) {
 func grpcAuthOrCredentialError(err error) string {
 	st, ok := status.FromError(err)
 	if ok {
-		msg := st.Message()
-		if strings.Contains(msg, "token") || strings.Contains(msg, "metadata") {
+		switch st.Code() {
+		case codes.Unauthenticated, codes.PermissionDenied:
 			return "error: grpc authorization failed"
 		}
 	}

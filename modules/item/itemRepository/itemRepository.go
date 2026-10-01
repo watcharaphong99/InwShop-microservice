@@ -39,7 +39,7 @@ func NewItemRepository(db *mongo.Client, cache *rediscon.Client) ItemRepositoryS
 	return &itemRepository{db: db, cache: cache}
 }
 
-func (r *itemRepository) itemDbConn(pctx context.Context) *mongo.Database {
+func (r *itemRepository) itemDbConn() *mongo.Database {
 	return r.db.Database("item_db")
 }
 
@@ -47,7 +47,7 @@ func (r *itemRepository) IsUniqueItem(pctx context.Context, title string) (bool,
 	ctx, cancle := context.WithTimeout(pctx, 10*time.Second)
 	defer cancle()
 
-	db := r.itemDbConn(ctx)
+	db := r.itemDbConn()
 	col := db.Collection("items")
 
 	result := new(item.Item)
@@ -65,7 +65,7 @@ func (r *itemRepository) InsertOneItem(pctx context.Context, req *item.Item) (pr
 	ctx, cancle := context.WithTimeout(pctx, 10*time.Second)
 	defer cancle()
 
-	db := r.itemDbConn(ctx)
+	db := r.itemDbConn()
 	col := db.Collection("items")
 
 	itemId, err := col.InsertOne(ctx, req)
@@ -92,7 +92,7 @@ func (r *itemRepository) FindOneItem(pctx context.Context, itemId string) (*item
 		return cached, nil
 	}
 
-	db := r.itemDbConn(ctx)
+	db := r.itemDbConn()
 	col := db.Collection("items")
 
 	result := new(item.Item)
@@ -138,7 +138,7 @@ func (r *itemRepository) FindItemsInIds(pctx context.Context, objectIds []primit
 	}
 
 	if len(missIds) > 0 {
-		col := r.itemDbConn(ctx).Collection("items")
+		col := r.itemDbConn().Collection("items")
 
 		cursors, err := col.Find(ctx, bson.M{"_id": bson.M{"$in": missIds}})
 		if err != nil {
@@ -178,7 +178,7 @@ func (r *itemRepository) FindManyItems(pctx context.Context, filter primitive.D,
 	ctx, cancle := context.WithTimeout(pctx, 10*time.Second)
 	defer cancle()
 
-	db := r.itemDbConn(ctx)
+	db := r.itemDbConn()
 	col := db.Collection("items")
 
 	cursors, err := col.Find(ctx, filter, opts...)
@@ -220,7 +220,7 @@ func (r *itemRepository) CountItems(pctx context.Context, filter primitive.D) (i
 	ctx, cancle := context.WithTimeout(pctx, 10*time.Second)
 	defer cancle()
 
-	db := r.itemDbConn(ctx)
+	db := r.itemDbConn()
 	col := db.Collection("items")
 
 	count, err := col.CountDocuments(ctx, filter)
@@ -241,7 +241,7 @@ func (r *itemRepository) UpdateOneItem(pctx context.Context, itemId string, req 
 		return err
 	}
 
-	db := r.itemDbConn(ctx)
+	db := r.itemDbConn()
 	col := db.Collection("items")
 
 	// result, err := col.UpdateOne(ctx, bson.M{"_id": utils.ConvertToObjectId(itemId)}, bson.M{"$set": req})
@@ -270,7 +270,7 @@ func (r *itemRepository) EnableOrDisableItem(pctx context.Context, itemId string
 		return err
 	}
 
-	db := r.itemDbConn(ctx)
+	db := r.itemDbConn()
 	col := db.Collection("items")
 
 	// result, err := col.UpdateOne(ctx, bson.M{"_id": utils.ConvertToObjectId(itemId)}, bson.M{"$set": bson.M{"usage_status": isActive}})
@@ -303,7 +303,7 @@ func (r *itemRepository) DeleteOneItem(pctx context.Context, itemId string) (int
 		return 0, err
 	}
 
-	db := r.itemDbConn(ctx)
+	db := r.itemDbConn()
 	col := db.Collection("items")
 
 	result, err := col.DeleteOne(ctx, bson.M{"_id": objectId})

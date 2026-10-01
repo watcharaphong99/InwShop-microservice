@@ -15,8 +15,10 @@ import (
 
 	"github.com/watcharaphong99/InwzaShop/config"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 type (
@@ -41,24 +43,24 @@ func (g *grpcAuth) unaryAuthorization(ctx context.Context, req any, info *grpc.U
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
 		log.Printf("Error: metadata not found")
-		return nil, errors.New("error: metadata not found")
+		return nil, status.Error(codes.Unauthenticated, "error: metadata not found")
 	}
 
 	authHeader, ok := md["auth"]
 	if !ok || len(authHeader) == 0 {
 		log.Printf("Error: auth metadata not found")
-		return nil, errors.New("error: metadata not found")
+		return nil, status.Error(codes.Unauthenticated, "error: metadata not found")
 	}
 
 	claims, err := jwtauth.ParseToken(g.secretKey, authHeader[0])
 	if err != nil {
 		log.Printf("Error: parse token failed: %s", err.Error())
-		return nil, errors.New("error: token is invalid")
+		return nil, status.Error(codes.Unauthenticated, "error: token is invalid")
 	}
 
 	if claims.Subject != "api-key" {
 		log.Printf("Error: token subject is invalid")
-		return nil, errors.New("error: token is invalid")
+		return nil, status.Error(codes.Unauthenticated, "error: token is invalid")
 	}
 
 	return handler(ctx, req)
