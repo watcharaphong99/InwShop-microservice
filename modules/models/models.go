@@ -27,3 +27,5 @@ type (
 		Offset int64 `json:"offset" bson:"offset"`
 	}
 )
+
+const KafkaOffsetID = "kafka_offset"

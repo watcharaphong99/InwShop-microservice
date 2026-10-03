@@ -24,6 +24,14 @@ type memPlayerRepo struct {
 	transactions []*player.PlayerTransaction
 }
 
+func (r *memPlayerRepo) GetOffset(context.Context) (int64, error) {
+	return -1, nil
+}
+
+func (r *memPlayerRepo) UpsertOffset(context.Context, int64) error {
+	return nil
+}
+
 func newMemPlayerRepo() *memPlayerRepo {
 	return &memPlayerRepo{players: map[string]*player.Player{}}
 }
@@ -42,6 +50,11 @@ func (r *memPlayerRepo) IsUniquePlayer(_ context.Context, email, username string
 func (r *memPlayerRepo) InsertOnePlayer(_ context.Context, req *player.Player) (primitive.ObjectID, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	for _, existing := range r.players {
+		if existing.Email == req.Email || existing.Username == req.Username {
+			return primitive.NilObjectID, errors.New("error: email or username already exist")
+		}
+	}
 	p := *req
 	p.Id = primitive.NewObjectID()
 	r.players[p.Id.Hex()] = &p
@@ -61,6 +74,16 @@ func (r *memPlayerRepo) FindOnePlayerProfine(_ context.Context, playerId string)
 func (r *memPlayerRepo) InsertOnePlayerTranscation(_ context.Context, req *player.PlayerTransaction) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if req.EventId != "" {
+		for _, tx := range r.transactions {
+			if tx.EventId == req.EventId {
+				if tx.PlayerId != req.PlayerId || tx.Amount != req.Amount {
+					return errors.New("error: event_id already used")
+				}
+				return nil
+			}
+		}
+	}
 	r.transactions = append(r.transactions, req)
 	return nil
 }
@@ -150,5 +173,51 @@ func TestPlayerFlowCreateThenFindProfile(t *testing.T) {
 	profile, err := grpc.CredentialSearch(context.Background(), &playerPb.CredentialSearchReq{Email: "new@inwza.com", Password: "123456"})
 	if err != nil || profile.Id != created.Id {
 		t.Fatalf("login via gRPC with stored bcrypt hash: %+v, %v", profile, err)
+	}
+}
+
+func TestPlayerFlowAddMoneyEventId(t *testing.T) {
+	repo := newMemPlayerRepo()
+	uc := playerUsecase.NewPlayerUsecase(repo)
+	req := &player.CreatePlayerTransactionReq{PlayerId: "player:abc", Amount: 100, EventId: "pay-1"}
+
+	first, err := uc.AddPlayerMoney(context.Background(), req)
+	if err != nil {
+		t.Fatalf("first add: %v", err)
+	}
+	if first.Balance != 100 {
+		t.Fatalf("first balance = %v, want 100", first.Balance)
+	}
+
+	replay, err := uc.AddPlayerMoney(context.Background(), req)
+	if err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if replay.Balance != 100 {
+		t.Fatalf("replay balance = %v, want 100", replay.Balance)
+	}
+
+	_, err = uc.AddPlayerMoney(context.Background(), &player.CreatePlayerTransactionReq{
+		PlayerId: "player:xyz", Amount: 100, EventId: "pay-1",
+	})
+	if err == nil || err.Error() != "error: event_id already used" {
+		t.Fatalf("other player replay err = %v", err)
+	}
+
+	_, err = uc.AddPlayerMoney(context.Background(), &player.CreatePlayerTransactionReq{
+		PlayerId: "player:abc", Amount: -100, EventId: "pay-1",
+	})
+	if err == nil || err.Error() != "error: event_id already used" {
+		t.Fatalf("different amount replay err = %v", err)
+	}
+
+	other, err := uc.AddPlayerMoney(context.Background(), &player.CreatePlayerTransactionReq{
+		PlayerId: "player:abc", Amount: 50, EventId: "pay-2",
+	})
+	if err != nil {
+		t.Fatalf("new event: %v", err)
+	}
+	if other.Balance != 150 {
+		t.Fatalf("new event balance = %v, want 150", other.Balance)
 	}
 }

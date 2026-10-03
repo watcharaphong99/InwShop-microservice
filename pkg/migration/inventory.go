@@ -28,10 +28,5 @@ func InventoryMigrate(pctx context.Context, cfg *config.Config) {
 	}
 
 	col = db.Collection("players_inventory_queue")
-
-	results, err := col.InsertOne(pctx, bson.M{"offset": -1}, nil)
-	if err != nil {
-		panic(err)
-	}
-	log.Println("Migrate inventory completed: ", results)
+	seedKafkaOffset(pctx, col)
 }

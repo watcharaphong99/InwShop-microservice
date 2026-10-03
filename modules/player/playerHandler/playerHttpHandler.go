@@ -80,6 +80,7 @@ func (h *playerHttpHandler) AddPlayerMoney(c echo.Context) error {
 	if req.PlayerId == "player:" {
 		return response.ErrResponse(c, http.StatusBadRequest, "error: player_id is required")
 	}
+	req.EventId = ""
 
 	res, err := h.playerUsecase.AddPlayerMoney(ctx, req)
 	if err != nil {

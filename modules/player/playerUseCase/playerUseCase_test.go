@@ -24,6 +24,14 @@ type fakePlayerRepo struct {
 	findProfileRefreshFn func(ctx context.Context, playerId string) (*player.Player, error)
 }
 
+func (f *fakePlayerRepo) GetOffset(context.Context) (int64, error) {
+	return -1, nil
+}
+
+func (f *fakePlayerRepo) UpsertOffset(context.Context, int64) error {
+	return nil
+}
+
 func (f *fakePlayerRepo) IsUniquePlayer(ctx context.Context, email, username string) bool {
 	if f.isUniqueFn == nil {
 		return false
@@ -216,11 +224,30 @@ func TestAddPlayerMoney(t *testing.T) {
 		}
 		res, err := NewPlayerUsecase(repo).AddPlayerMoney(context.Background(), req)
 		assertErr(t, err, "")
-		if tx.PlayerId != "player:abc" || tx.Amount != 100 || tx.CreatedAt.IsZero() {
+		if tx.PlayerId != "player:abc" || tx.Amount != 100 || tx.EventId != "" || tx.CreatedAt.IsZero() {
 			t.Fatalf("transaction = %+v", tx)
 		}
 		if res.Balance != 100 || res.PlayerId != "player:abc" {
 			t.Fatalf("res = %+v", res)
+		}
+	})
+
+	t.Run("forwards event_id", func(t *testing.T) {
+		req := &player.CreatePlayerTransactionReq{PlayerId: "player:abc", Amount: 100, EventId: "pay-1"}
+		var tx *player.PlayerTransaction
+		repo := &fakePlayerRepo{
+			insertTransactionFn: func(_ context.Context, r *player.PlayerTransaction) error {
+				tx = r
+				return nil
+			},
+			getSavingAccountFn: func(_ context.Context, id string) (*player.PlayerSavingAccount, error) {
+				return &player.PlayerSavingAccount{PlayerId: id, Balance: 100}, nil
+			},
+		}
+		_, err := NewPlayerUsecase(repo).AddPlayerMoney(context.Background(), req)
+		assertErr(t, err, "")
+		if tx.EventId != "pay-1" {
+			t.Fatalf("event_id = %q", tx.EventId)
 		}
 	})
 

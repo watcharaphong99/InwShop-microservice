@@ -2,11 +2,9 @@ package migration
 
 import (
 	"context"
-	"log"
 
 	"github.com/watcharaphong99/InwzaShop/config"
 	"github.com/watcharaphong99/InwzaShop/pkg/database"
-	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
@@ -19,10 +17,5 @@ func PaymentMigrate(pctx context.Context, cfg *config.Config) {
 	defer db.Client().Disconnect(pctx)
 
 	col := db.Collection("payment_queue")
-
-	results, err := col.InsertOne(pctx, bson.M{"offset": -1}, nil)
-	if err != nil {
-		panic(err)
-	}
-	log.Println("Migrate payment completed: ", results)
+	seedKafkaOffset(pctx, col)
 }

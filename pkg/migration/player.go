@@ -11,6 +11,7 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -23,23 +24,21 @@ func PlayerMigrate(pctx context.Context, cfg *config.Config) {
 	defer db.Client().Disconnect(pctx)
 
 	col := db.Collection("player_transactions")
-
-	// indexs
-	indexs, _ := col.Indexes().CreateMany(pctx, []mongo.IndexModel{
+	mustCreateIndexes(pctx, col, []mongo.IndexModel{
 		{Keys: bson.D{{"_id", 1}}},
 		{Keys: bson.D{{"player_id", 1}}},
+		{
+			Keys:    bson.D{{"event_id", 1}},
+			Options: options.Index().SetUnique(true).SetSparse(true),
+		},
 	})
 
-	for _, index := range indexs {
-		log.Printf("Index: %s", index)
-	}
-
 	col = db.Collection("players")
-
-	//index
-	indexs, _ = col.Indexes().CreateMany(pctx, []mongo.IndexModel{
+	dropIndexIfExists(pctx, col, "email_1")
+	mustCreateIndexes(pctx, col, []mongo.IndexModel{
 		{Keys: bson.D{{"_id", 1}}},
-		{Keys: bson.D{{"email", 1}}},
+		{Keys: bson.D{{"email", 1}}, Options: options.Index().SetUnique(true)},
+		{Keys: bson.D{{"username", 1}}, Options: options.Index().SetUnique(true)},
 	})
 
 	documents := func() []any {
@@ -102,7 +101,7 @@ func PlayerMigrate(pctx context.Context, cfg *config.Config) {
 					hashedPassword, _ := bcrypt.GenerateFromPassword([]byte("123456"), bcrypt.DefaultCost)
 					return string(hashedPassword)
 				}(),
-				Username: "Player003",
+				Username: "Admin001",
 				PlayerRoles: []player.PlayerRole{
 					{
 						RoleTitle: "player",
@@ -149,11 +148,5 @@ func PlayerMigrate(pctx context.Context, cfg *config.Config) {
 	log.Println("Migrate player_transactions completed: ", results)
 
 	col = db.Collection("player_transactions_queue")
-	result, err := col.InsertOne(pctx, bson.M{"offset": -1}, nil)
-
-	if err != nil {
-		panic(err)
-	}
-	log.Println("Migrate player_transactions_queue completed", result)
-
+	seedKafkaOffset(pctx, col)
 }

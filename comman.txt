@@ -38,3 +38,15 @@ docker exec inwza-redis redis-cli ping                     # เช็คว่�
 docker exec inwza-redis redis-cli KEYS 'auth:access:*'     # ดู token ที่ cache ไว้
 docker exec -it inwza-redis redis-cli                      # เข้า redis-cli
 docker compose -f docker-compose.db.yml stop redis         # หยุด Redis
+
+
+payment Logic
+pemnt ——> ยิง service 
+1 ดึงราคา Item จาก ItemService
+2 ยิงไป หักเงินใน service player
+3 หักเสร็จ เอา Item ไปเพิ่มในกระเป๋า
+
+ยิงตามลำดับ หักเงิน player แล้วเพิ่มของในกระเป๋า 
+สมมุตพัง
+-หาก player พัง บันทึกและจะย้อน transaction มาที่ player by แล้วให้ play by ยิงไป roleback Transaction ที่ insert ออก 
+- หาก service Inventroy พัง ก็จะยิงย้อนกลับไป payment แล้วให้ payment ยิงไป roleback Transaction ที่ insert ออก ที่ player และ Inventroy ตามลำดับ

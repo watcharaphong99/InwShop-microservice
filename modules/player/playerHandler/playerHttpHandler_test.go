@@ -25,6 +25,14 @@ type fakePlayerUsecase struct {
 	findProfileRefreshFn func(ctx context.Context, playerId string) (*playerPb.PlayerProfile, error)
 }
 
+func (f *fakePlayerUsecase) GetOffset(context.Context) (int64, error) {
+	return -1, nil
+}
+
+func (f *fakePlayerUsecase) UpsertOffset(context.Context, int64) error {
+	return nil
+}
+
 func (f *fakePlayerUsecase) CreatePlayer(ctx context.Context, req *player.CreatePlayerReq) (*player.PlayerProfile, error) {
 	return f.createPlayerFn(ctx, req)
 }
@@ -215,6 +223,22 @@ func TestAddPlayerMoneyHandler(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("strips client event_id", func(t *testing.T) {
+		uc := &fakePlayerUsecase{addMoneyFn: func(_ context.Context, req *player.CreatePlayerTransactionReq) (*player.PlayerSavingAccount, error) {
+			if req.EventId != "" {
+				t.Fatalf("event_id = %q, want empty", req.EventId)
+			}
+			return &player.PlayerSavingAccount{PlayerId: req.PlayerId, Balance: req.Amount}, nil
+		}}
+		rec := serve(t, newHandler(uc).AddPlayerMoney, http.MethodPost, reqOpts{
+			body:     `{"player_id":"ignored","amount":100,"event_id":"pay-1"}`,
+			playerId: "abc",
+		})
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("status = %d, want %d, body %s", rec.Code, http.StatusCreated, rec.Body.String())
+		}
+	})
 }
 
 func TestGetPlayerSavingAccountHandler(t *testing.T) {

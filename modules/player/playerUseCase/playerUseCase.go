@@ -16,6 +16,8 @@ import (
 
 type (
 	PlayerUsecaseService interface {
+		GetOffset(pctx context.Context) (int64, error)
+		UpsertOffset(pctx context.Context, offset int64) error
 		CreatePlayer(pctx context.Context, req *player.CreatePlayerReq) (*player.PlayerProfile, error)
 		FindOnePlayerProfile(pctx context.Context, playerId string) (*player.PlayerProfile, error)
 		AddPlayerMoney(pctx context.Context, req *player.CreatePlayerTransactionReq) (*player.PlayerSavingAccount, error)
@@ -31,6 +33,14 @@ type (
 
 func NewPlayerUsecase(playerRepository playerRepository.PlayerRepositoryService) PlayerUsecaseService {
 	return &playerUsecase{playerRepository: playerRepository}
+}
+
+func (u *playerUsecase) GetOffset(pctx context.Context) (int64, error) {
+	return u.playerRepository.GetOffset(pctx)
+}
+
+func (u *playerUsecase) UpsertOffset(pctx context.Context, offset int64) error {
+	return u.playerRepository.UpsertOffset(pctx, offset)
 }
 
 func (u *playerUsecase) CreatePlayer(pctx context.Context, req *player.CreatePlayerReq) (*player.PlayerProfile, error) {
@@ -92,6 +102,7 @@ func (u *playerUsecase) AddPlayerMoney(pctx context.Context, req *player.CreateP
 	if err := u.playerRepository.InsertOnePlayerTranscation(pctx, &player.PlayerTransaction{
 		PlayerId:  req.PlayerId,
 		Amount:    req.Amount,
+		EventId:   req.EventId,
 		CreatedAt: utils.LocalTime(),
 	}); err != nil {
 		return nil, err

@@ -6,6 +6,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/watcharaphong99/InwzaShop/modules/models"
 	"github.com/watcharaphong99/InwzaShop/modules/player"
 	"github.com/watcharaphong99/InwzaShop/pkg/utils"
 	"go.mongodb.org/mongo-driver/bson"
@@ -16,6 +17,8 @@ import (
 
 type (
 	PlayerRepositoryService interface {
+		GetOffset(pctx context.Context) (int64, error)
+		UpsertOffset(pctx context.Context, offset int64) error
 		IsUniquePlayer(pctx context.Context, email, username string) bool
 		InsertOnePlayer(pctx context.Context, req *player.Player) (primitive.ObjectID, error)
 		FindOnePlayerProfine(pctx context.Context, playerId string) (*player.PlayerProfileBson, error)
@@ -36,6 +39,42 @@ func NewPlayerRepository(db *mongo.Client) PlayerRepositoryService {
 
 func (r *playerRepository) playerDbConn() *mongo.Database {
 	return r.db.Database("player_db")
+}
+
+func (r *playerRepository) GetOffset(pctx context.Context) (int64, error) {
+	ctx, cancel := context.WithTimeout(pctx, 10*time.Second)
+	defer cancel()
+
+	db := r.playerDbConn()
+	col := db.Collection("player_transactions_queue")
+
+	result := new(models.KafkaOffset)
+	if err := col.FindOne(ctx, bson.M{"_id": models.KafkaOffsetID}).Decode(result); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return -1, nil
+		}
+		log.Printf("Error: GetOffset failed: %s", err.Error())
+		return -1, errors.New("error: GetOffset failed")
+	}
+
+	return result.Offset, nil
+}
+
+func (r *playerRepository) UpsertOffset(pctx context.Context, offset int64) error {
+	ctx, cancel := context.WithTimeout(pctx, 10*time.Second)
+	defer cancel()
+
+	db := r.playerDbConn()
+	col := db.Collection("player_transactions_queue")
+
+	result, err := col.UpdateOne(ctx, bson.M{"_id": models.KafkaOffsetID}, bson.M{"$max": bson.M{"offset": offset}}, options.Update().SetUpsert(true))
+	if err != nil {
+		log.Printf("Error: UpsertOffset failed: %s", err.Error())
+		return errors.New("error: UpsertOffset failed")
+	}
+	log.Printf("Info: UpsertOffset result: %v", result)
+
+	return nil
 }
 
 func (r *playerRepository) IsUniquePlayer(pctx context.Context, email, username string) bool {
@@ -69,6 +108,9 @@ func (r *playerRepository) InsertOnePlayer(pctx context.Context, req *player.Pla
 	playerId, err := col.InsertOne(ctx, req)
 	if err != nil {
 		log.Printf("Error: InsertOnePlayer: %s", err.Error())
+		if mongo.IsDuplicateKeyError(err) {
+			return primitive.NewObjectID(), errors.New("error: email or username already exist")
+		}
 		return primitive.NewObjectID(), errors.New("error: insert one player failed")
 	}
 
@@ -117,12 +159,38 @@ func (r *playerRepository) InsertOnePlayerTranscation(pctx context.Context, req 
 
 	result, err := col.InsertOne(ctx, req)
 	if err != nil {
+		if mongo.IsDuplicateKeyError(err) {
+			return r.sameEventTransactionOrConflict(ctx, col, req)
+		}
 		log.Printf("Error: InseartOnePlayerTransaction: %s", err.Error())
 		return errors.New("error: insert one player transaction failed")
 	}
 	log.Printf("Result: InseartOnePlayerTransaction: %v", result.InsertedID)
 
 	return nil
+}
+
+func (r *playerRepository) sameEventTransactionOrConflict(ctx context.Context, col *mongo.Collection, req *player.PlayerTransaction) error {
+	if req.EventId == "" {
+		return errors.New("error: insert one player transaction failed")
+	}
+
+	existing := new(player.PlayerTransaction)
+	if err := col.FindOne(ctx, bson.M{"event_id": req.EventId}).Decode(existing); err != nil {
+		log.Printf("Error: find player transaction by event_id: %s", err.Error())
+		return errors.New("error: insert one player transaction failed")
+	}
+	if !sameEventTransaction(existing, req) {
+		log.Printf("Error: event_id already used: %s", req.EventId)
+		return errors.New("error: event_id already used")
+	}
+
+	log.Printf("Info: InseartOnePlayerTransaction duplicate event_id: %s", req.EventId)
+	return nil
+}
+
+func sameEventTransaction(existing, incoming *player.PlayerTransaction) bool {
+	return existing.PlayerId == incoming.PlayerId && existing.Amount == incoming.Amount
 }
 
 func (r *playerRepository) GetPlayerSavingAccount(pctx context.Context, playerId string) (*player.PlayerSavingAccount, error) {
