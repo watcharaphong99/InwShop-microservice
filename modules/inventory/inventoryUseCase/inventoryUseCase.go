@@ -10,6 +10,7 @@ import (
 	"github.com/watcharaphong99/InwzaShop/modules/item"
 	itemPb "github.com/watcharaphong99/InwzaShop/modules/item/itemPb"
 	"github.com/watcharaphong99/InwzaShop/modules/models"
+	"github.com/watcharaphong99/InwzaShop/modules/payment"
 	"github.com/watcharaphong99/InwzaShop/pkg/utils"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -17,9 +18,13 @@ import (
 
 type (
 	InventoryUsecaseService interface {
-		FindPlayerItems(pctx context.Context, cfg *config.Config, playerId string, req *inventory.InventorySearchReq) (*models.PaginateRes, error)
 		GetOffset(pctx context.Context) (int64, error)
 		UpsertOffset(pctx context.Context, offset int64) error
+		FindPlayerItems(pctx context.Context, cfg *config.Config, playerId string, req *inventory.InventorySearchReq) (*models.PaginateRes, error)
+		AddPlayerItemRes(pctx context.Context, cfg *config.Config, req *inventory.UpdateInventoryReq)
+		RemovePlayerItemRes(pctx context.Context, cfg *config.Config, req *inventory.UpdateInventoryReq)
+		RollbackAddPlayerItem(pctx context.Context, cfg *config.Config, req *inventory.RollbackPlayerInventoryReq)
+		RollbackRemovePlayerItem(pctx context.Context, cfg *config.Config, req *inventory.RollbackPlayerInventoryReq)
 	}
 
 	inventoryUsecase struct {
@@ -28,13 +33,14 @@ type (
 )
 
 func NewInventoryUsecase(inventoryRepository inventoryRepository.InventoryRepositoryService) InventoryUsecaseService {
-	return &inventoryUsecase{inventoryRepository: inventoryRepository}
+	return &inventoryUsecase{
+		inventoryRepository: inventoryRepository,
+	}
 }
 
 func (u *inventoryUsecase) GetOffset(pctx context.Context) (int64, error) {
 	return u.inventoryRepository.GetOffset(pctx)
 }
-
 func (u *inventoryUsecase) UpsertOffset(pctx context.Context, offset int64) error {
 	return u.inventoryRepository.UpsertOffset(pctx, offset)
 }
@@ -45,14 +51,14 @@ func (u *inventoryUsecase) FindPlayerItems(pctx context.Context, cfg *config.Con
 
 	// Filter
 	if req.Start != "" {
-		filter = append(filter, bson.E{Key: "_id", Value: bson.D{{Key: "$gt", Value: utils.ConvertToObjectId(req.Start)}}})
+		filter = append(filter, bson.E{"_id", bson.D{{"$gt", utils.ConvertToObjectId(req.Start)}}})
 	}
-	filter = append(filter, bson.E{Key: "player_id", Value: playerId})
+	filter = append(filter, bson.E{"player_id", playerId})
 
 	// Option
 	opts := make([]*options.FindOptions, 0)
 
-	opts = append(opts, options.Find().SetSort(bson.D{{Key: "_id", Value: 1}}))
+	opts = append(opts, options.Find().SetSort(bson.D{{"_id", 1}}))
 	opts = append(opts, options.Find().SetLimit(int64(req.Limit)))
 
 	// Find
@@ -129,4 +135,77 @@ func (u *inventoryUsecase) FindPlayerItems(pctx context.Context, cfg *config.Con
 			Href:  fmt.Sprintf("%s/%s?limit=%d&start=%s", cfg.Paginate.InventoryNextPageBasedUrl, playerId, req.Limit, results[len(results)-1].InventoryId),
 		},
 	}, nil
+}
+
+func (u *inventoryUsecase) AddPlayerItemRes(pctx context.Context, cfg *config.Config, req *inventory.UpdateInventoryReq) {
+	inventoryId, err := u.inventoryRepository.InsertOnePlayerItem(pctx, &inventory.Inventory{
+		PlayerId: req.PlayerId,
+		ItemId:   req.ItemId,
+	})
+	if err != nil {
+		u.inventoryRepository.AddPlayerItemRes(pctx, cfg, &payment.PaymentTransferRes{
+			InventoryId:   "",
+			TransactionId: "",
+			PlayerId:      req.PlayerId,
+			ItemId:        req.ItemId,
+			Amount:        0,
+			Error:         err.Error(),
+		})
+		return
+	}
+
+	u.inventoryRepository.AddPlayerItemRes(pctx, cfg, &payment.PaymentTransferRes{
+		InventoryId:   inventoryId.Hex(),
+		TransactionId: "",
+		PlayerId:      req.PlayerId,
+		ItemId:        req.ItemId,
+		Amount:        0,
+		Error:         "",
+	})
+}
+
+func (u *inventoryUsecase) RemovePlayerItemRes(pctx context.Context, cfg *config.Config, req *inventory.UpdateInventoryReq) {
+	if !u.inventoryRepository.FindOnePlayerItem(pctx, req.PlayerId, req.ItemId) {
+		u.inventoryRepository.RemovePlayerItemRes(pctx, cfg, &payment.PaymentTransferRes{
+			InventoryId:   "",
+			TransactionId: "",
+			PlayerId:      req.PlayerId,
+			ItemId:        req.ItemId,
+			Amount:        0,
+			Error:         "error: item not found",
+		})
+		return
+	}
+
+	if err := u.inventoryRepository.DeleteOnePlayerItem(pctx, req.PlayerId, req.ItemId); err != nil {
+		u.inventoryRepository.RemovePlayerItemRes(pctx, cfg, &payment.PaymentTransferRes{
+			InventoryId:   "",
+			TransactionId: "",
+			PlayerId:      req.PlayerId,
+			ItemId:        req.ItemId,
+			Amount:        0,
+			Error:         err.Error(),
+		})
+		return
+	}
+
+	u.inventoryRepository.RemovePlayerItemRes(pctx, cfg, &payment.PaymentTransferRes{
+		InventoryId:   "",
+		TransactionId: "",
+		PlayerId:      req.PlayerId,
+		ItemId:        req.ItemId,
+		Amount:        0,
+		Error:         "",
+	})
+}
+
+func (u *inventoryUsecase) RollbackAddPlayerItem(pctx context.Context, cfg *config.Config, req *inventory.RollbackPlayerInventoryReq) {
+	u.inventoryRepository.DeleteOneInventory(pctx, req.InventoryId)
+}
+
+func (u *inventoryUsecase) RollbackRemovePlayerItem(pctx context.Context, cfg *config.Config, req *inventory.RollbackPlayerInventoryReq) {
+	u.inventoryRepository.InsertOnePlayerItem(pctx, &inventory.Inventory{
+		PlayerId: req.PlayerId,
+		ItemId:   req.ItemId,
+	})
 }

@@ -15,6 +15,12 @@ func (s *server) inventoryService() {
 	usecase := inventoryusecase.NewInventoryUsecase(repo)
 	httpHandler := inventoryHandler.NewInventoryHttpHandler(s.cfg, usecase)
 	grpcHandler := inventoryHandler.NewInventoryGrpcHandler(usecase)
+	queueHandler := inventoryHandler.NewInventoryQueueHandler(s.cfg, usecase)
+
+	go queueHandler.AddPlayerItem()
+	go queueHandler.RollbackAddPlayerItem()
+	go queueHandler.RemovePlayerItem()
+	go queueHandler.RollbackRemovePlayerItem()
 
 	//gRpc
 	go func() {

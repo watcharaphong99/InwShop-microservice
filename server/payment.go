@@ -9,14 +9,16 @@ import (
 func (s *server) paymentService() {
 	repo := paymentRepository.NewPaymentRepository(s.db)
 	usecase := paymentUsecase.NewPaymentUsecase(repo)
-	httpHander := paymentHandler.NewPaymentHttp(s.cfg, usecase)
+	httpHandler := paymentHandler.NewPaymentHttpHandler(s.cfg, usecase)
 	queue := paymentHandler.NewPaymentQueue(s.cfg, usecase)
 
-	_ = httpHander
 	_ = queue
 
 	payment := s.app.Group("/payment_v1")
 	//help check
 	payment.GET("", s.healthcheckService)
+
+	payment.POST("/payment/buy", httpHandler.BuyItem, s.middleware.JwtAuthorization)
+	payment.POST("/payment/sell", httpHandler.SellItem, s.middleware.JwtAuthorization)
 
 }
