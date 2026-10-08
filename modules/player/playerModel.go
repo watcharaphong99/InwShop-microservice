@@ -1,6 +1,9 @@
 package player
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
 type (
 	PlayerProfile struct {
@@ -30,5 +33,8 @@ type (
 
 	RollbackPlayerTransactionReq struct {
 		TransactionId string `json:"transaction_id"`
+		EventId       string `json:"event_id"`
 	}
 )
+
+var ErrEventCancelled = errors.New("error: event cancelled")

@@ -11,6 +11,7 @@ import (
 	"github.com/watcharaphong99/InwzaShop/modules/inventory"
 	itemPb "github.com/watcharaphong99/InwzaShop/modules/item/itemPb"
 	"github.com/watcharaphong99/InwzaShop/modules/models"
+	"github.com/watcharaphong99/InwzaShop/modules/payment"
 	"github.com/watcharaphong99/InwzaShop/modules/player"
 	"github.com/watcharaphong99/InwzaShop/pkg/grpccon"
 	"github.com/watcharaphong99/InwzaShop/pkg/jwtauth"
@@ -32,6 +33,8 @@ type (
 		RemovePlayerItem(pctx context.Context, cfg *config.Config, req *inventory.UpdateInventoryReq) error
 		RollbackRemovePlayerItem(pctx context.Context, cfg *config.Config, req *inventory.RollbackPlayerInventoryReq) error
 		AddPlayerMoney(pctx context.Context, cfg *config.Config, req *player.CreatePlayerTransactionReq) error
+		SaveSaga(pctx context.Context, saga *payment.Saga) error
+		ListStaleSagas(pctx context.Context, olderThan time.Time) ([]*payment.Saga, error)
 	}
 
 	paymentRepository struct {
@@ -43,7 +46,7 @@ func NewPaymentRepository(db *mongo.Client) PaymentRepositoryService {
 	return &paymentRepository{db}
 }
 
-func (r *paymentRepository) paymentDbConn(pctx context.Context) *mongo.Database {
+func (r *paymentRepository) paymentDbConn() *mongo.Database {
 	return r.db.Database("payment_db")
 }
 
@@ -51,11 +54,14 @@ func (r *paymentRepository) GetOffset(pctx context.Context) (int64, error) {
 	ctx, cancel := context.WithTimeout(pctx, 10*time.Second)
 	defer cancel()
 
-	db := r.paymentDbConn(ctx)
+	db := r.paymentDbConn()
 	col := db.Collection("payment_queue")
 
 	result := new(models.KafkaOffset)
 	if err := col.FindOne(ctx, bson.M{}).Decode(result); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return -1, nil
+		}
 		log.Printf("Error: GetOffset failed: %s", err.Error())
 		return -1, errors.New("error: GetOffset failed")
 	}
@@ -67,7 +73,7 @@ func (r *paymentRepository) UpsertOffset(pctx context.Context, offset int64) err
 	ctx, cancel := context.WithTimeout(pctx, 10*time.Second)
 	defer cancel()
 
-	db := r.paymentDbConn(ctx)
+	db := r.paymentDbConn()
 	col := db.Collection("payment_queue")
 
 	result, err := col.UpdateOne(ctx, bson.M{}, bson.M{"$set": bson.M{"offset": offset}}, options.Update().SetUpsert(true))
@@ -90,6 +96,7 @@ func (r *paymentRepository) FindItemsInIds(pctx context.Context, grpcUrl string,
 		log.Printf("Error: gRPC connection failed: %s", err.Error())
 		return nil, errors.New("error: gRPC connection failed")
 	}
+	defer conn.Close()
 
 	result, err := conn.Item().FindItemsInIds(ctx, req)
 	if err != nil {
@@ -97,13 +104,8 @@ func (r *paymentRepository) FindItemsInIds(pctx context.Context, grpcUrl string,
 		return nil, errors.New("error: items not found")
 	}
 
-	if result == nil {
-		log.Printf("Error: FindItemsInIds failed: %s", err.Error())
-		return nil, errors.New("error: items not found")
-	}
-
-	if len(result.Items) == 0 {
-		log.Printf("Error: FindItemsInIds failed: %s", err.Error())
+	if result == nil || len(result.Items) == 0 {
+		log.Printf("Error: FindItemsInIds failed: empty item result")
 		return nil, errors.New("error: items not found")
 	}
 
@@ -261,4 +263,51 @@ func (r *paymentRepository) RollbackRemovePlayerItem(pctx context.Context, cfg *
 	}
 
 	return nil
+}
+
+func (r *paymentRepository) SaveSaga(pctx context.Context, saga *payment.Saga) error {
+	ctx, cancel := context.WithTimeout(pctx, 10*time.Second)
+	defer cancel()
+
+	saga.UpdatedAt = time.Now()
+	_, err := r.paymentDbConn().Collection("payment_sagas").ReplaceOne(
+		ctx,
+		bson.M{"_id": saga.ID},
+		saga,
+		options.Replace().SetUpsert(true),
+	)
+	if err != nil {
+		log.Printf("Error: SaveSaga failed: %s", err.Error())
+		return errors.New("error: save saga failed")
+	}
+	return nil
+}
+
+func (r *paymentRepository) ListStaleSagas(pctx context.Context, olderThan time.Time) ([]*payment.Saga, error) {
+	ctx, cancel := context.WithTimeout(pctx, 10*time.Second)
+	defer cancel()
+
+	cursor, err := r.paymentDbConn().Collection("payment_sagas").Find(ctx, bson.M{
+		"status":     "running",
+		"updated_at": bson.M{"$lt": olderThan},
+	})
+	if err != nil {
+		log.Printf("Error: ListStaleSagas failed: %s", err.Error())
+		return nil, errors.New("error: list saga failed")
+	}
+	defer cursor.Close(ctx)
+	sagas := make([]*payment.Saga, 0)
+	for cursor.Next(ctx) {
+		saga := new(payment.Saga)
+		if err := cursor.Decode(saga); err != nil {
+			log.Printf("Error: decode saga: %s", err.Error())
+			return nil, errors.New("error: list saga failed")
+		}
+		sagas = append(sagas, saga)
+	}
+	if err := cursor.Err(); err != nil {
+		log.Printf("Error: ListStaleSagas cursor: %s", err.Error())
+		return nil, errors.New("error: list saga failed")
+	}
+	return sagas, nil
 }

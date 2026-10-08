@@ -11,8 +11,7 @@ func (s *server) paymentService() {
 	usecase := paymentUsecase.NewPaymentUsecase(repo)
 	httpHandler := paymentHandler.NewPaymentHttpHandler(s.cfg, usecase)
 	queue := paymentHandler.NewPaymentQueue(s.cfg, usecase)
-
-	_ = queue
+	go queue.Listen()
 
 	payment := s.app.Group("/payment_v1")
 	//help check

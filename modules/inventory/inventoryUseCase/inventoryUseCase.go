@@ -3,6 +3,7 @@ package inventoryUsecase
 import (
 	"context"
 	"fmt"
+	"log"
 
 	"github.com/watcharaphong99/InwzaShop/config"
 	"github.com/watcharaphong99/InwzaShop/modules/inventory"
@@ -54,6 +55,7 @@ func (u *inventoryUsecase) FindPlayerItems(pctx context.Context, cfg *config.Con
 		filter = append(filter, bson.E{"_id", bson.D{{"$gt", utils.ConvertToObjectId(req.Start)}}})
 	}
 	filter = append(filter, bson.E{"player_id", playerId})
+	filter = append(filter, bson.E{"removed_event_id", bson.M{"$exists": false}})
 
 	// Option
 	opts := make([]*options.FindOptions, 0)
@@ -138,74 +140,72 @@ func (u *inventoryUsecase) FindPlayerItems(pctx context.Context, cfg *config.Con
 }
 
 func (u *inventoryUsecase) AddPlayerItemRes(pctx context.Context, cfg *config.Config, req *inventory.UpdateInventoryReq) {
+	if req.EventId == "" {
+		log.Printf("Error: AddPlayerItemRes missing event_id")
+		u.replyAddItem(pctx, cfg, req, "", "error: event_id is required")
+		return
+	}
+
 	inventoryId, err := u.inventoryRepository.InsertOnePlayerItem(pctx, &inventory.Inventory{
 		PlayerId: req.PlayerId,
 		ItemId:   req.ItemId,
+		EventId:  req.EventId,
 	})
 	if err != nil {
-		u.inventoryRepository.AddPlayerItemRes(pctx, cfg, &payment.PaymentTransferRes{
-			InventoryId:   "",
-			TransactionId: "",
-			PlayerId:      req.PlayerId,
-			ItemId:        req.ItemId,
-			Amount:        0,
-			Error:         err.Error(),
-		})
+		u.replyAddItem(pctx, cfg, req, "", err.Error())
 		return
 	}
 
-	u.inventoryRepository.AddPlayerItemRes(pctx, cfg, &payment.PaymentTransferRes{
-		InventoryId:   inventoryId.Hex(),
-		TransactionId: "",
-		PlayerId:      req.PlayerId,
-		ItemId:        req.ItemId,
-		Amount:        0,
-		Error:         "",
-	})
+	u.replyAddItem(pctx, cfg, req, inventoryId.Hex(), "")
 }
 
 func (u *inventoryUsecase) RemovePlayerItemRes(pctx context.Context, cfg *config.Config, req *inventory.UpdateInventoryReq) {
-	if !u.inventoryRepository.FindOnePlayerItem(pctx, req.PlayerId, req.ItemId) {
-		u.inventoryRepository.RemovePlayerItemRes(pctx, cfg, &payment.PaymentTransferRes{
-			InventoryId:   "",
-			TransactionId: "",
-			PlayerId:      req.PlayerId,
-			ItemId:        req.ItemId,
-			Amount:        0,
-			Error:         "error: item not found",
-		})
+	if req.EventId == "" {
+		log.Printf("Error: RemovePlayerItemRes missing event_id")
+		u.replyRemoveItem(pctx, cfg, req, "error: event_id is required")
 		return
 	}
 
-	if err := u.inventoryRepository.DeleteOnePlayerItem(pctx, req.PlayerId, req.ItemId); err != nil {
-		u.inventoryRepository.RemovePlayerItemRes(pctx, cfg, &payment.PaymentTransferRes{
-			InventoryId:   "",
-			TransactionId: "",
-			PlayerId:      req.PlayerId,
-			ItemId:        req.ItemId,
-			Amount:        0,
-			Error:         err.Error(),
-		})
+	err := u.inventoryRepository.RemovePlayerItemByEvent(pctx, req.PlayerId, req.ItemId, req.EventId)
+	if err != nil {
+		u.replyRemoveItem(pctx, cfg, req, err.Error())
 		return
 	}
 
-	u.inventoryRepository.RemovePlayerItemRes(pctx, cfg, &payment.PaymentTransferRes{
-		InventoryId:   "",
-		TransactionId: "",
-		PlayerId:      req.PlayerId,
-		ItemId:        req.ItemId,
-		Amount:        0,
-		Error:         "",
-	})
+	u.replyRemoveItem(pctx, cfg, req, "")
 }
 
 func (u *inventoryUsecase) RollbackAddPlayerItem(pctx context.Context, cfg *config.Config, req *inventory.RollbackPlayerInventoryReq) {
-	u.inventoryRepository.DeleteOneInventory(pctx, req.InventoryId)
+	if err := u.inventoryRepository.RollbackAddedItem(pctx, req.InventoryId, req.EventId); err != nil {
+		log.Printf("Error: RollbackAddPlayerItem: %s", err.Error())
+	}
 }
 
 func (u *inventoryUsecase) RollbackRemovePlayerItem(pctx context.Context, cfg *config.Config, req *inventory.RollbackPlayerInventoryReq) {
-	u.inventoryRepository.InsertOnePlayerItem(pctx, &inventory.Inventory{
+	if err := u.inventoryRepository.RollbackRemovedItem(pctx, req.EventId); err != nil {
+		log.Printf("Error: RollbackRemovePlayerItem: %s", err.Error())
+	}
+}
+
+func (u *inventoryUsecase) replyAddItem(pctx context.Context, cfg *config.Config, req *inventory.UpdateInventoryReq, inventoryID, errMsg string) {
+	if err := u.inventoryRepository.AddPlayerItemRes(pctx, cfg, &payment.PaymentTransferRes{
+		EventId:     req.EventId,
+		InventoryId: inventoryID,
+		PlayerId:    req.PlayerId,
+		ItemId:      req.ItemId,
+		Error:       errMsg,
+	}); err != nil {
+		log.Printf("Error: AddPlayerItemRes reply: %s", err.Error())
+	}
+}
+
+func (u *inventoryUsecase) replyRemoveItem(pctx context.Context, cfg *config.Config, req *inventory.UpdateInventoryReq, errMsg string) {
+	if err := u.inventoryRepository.RemovePlayerItemRes(pctx, cfg, &payment.PaymentTransferRes{
+		EventId:  req.EventId,
 		PlayerId: req.PlayerId,
 		ItemId:   req.ItemId,
-	})
+		Error:    errMsg,
+	}); err != nil {
+		log.Printf("Error: RemovePlayerItemRes reply: %s", err.Error())
+	}
 }

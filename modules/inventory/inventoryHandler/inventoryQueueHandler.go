@@ -3,7 +3,6 @@ package inventoryHandler
 import (
 	"context"
 	"log"
-	"os"
 	"os/signal"
 	"syscall"
 
@@ -16,10 +15,7 @@ import (
 
 type (
 	InventoryQueueHandlerService interface {
-		AddPlayerItem()
-		RemovePlayerItem()
-		RollbackAddPlayerItem()
-		RollbackRemovePlayerItem()
+		Listen()
 	}
 
 	inventoryQueueHandler struct {
@@ -35,186 +31,83 @@ func NewInventoryQueueHandler(cfg *config.Config, inventoryUsecase inventoryUsec
 	}
 }
 
-func (h *inventoryQueueHandler) InventoryConsumer(pctx context.Context) (sarama.PartitionConsumer, error) {
+func (h *inventoryQueueHandler) Listen() {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	worker, err := queue.ConnectConsumer([]string{h.cfg.Kafka.Url}, h.cfg.Kafka.ApiKey, h.cfg.Kafka.Secret)
 	if err != nil {
-		return nil, err
+		log.Printf("Error: inventory consumer connect: %s", err.Error())
+		return
+	}
+	defer worker.Close()
+
+	offset, err := h.inventoryUsecase.GetOffset(ctx)
+	if err != nil {
+		log.Printf("Error: inventory offset: %s", err.Error())
+		return
 	}
 
-	offset, err := h.inventoryUsecase.GetOffset(pctx)
+	consumer, err := queue.ConsumeFromStoredOffset(worker, "inventory", offset)
 	if err != nil {
-		return nil, err
-	}
-
-	consumer, err := worker.ConsumePartition("inventory", 0, offset)
-	if err != nil {
-		log.Println("Trying to set offset as 0")
-		consumer, err = worker.ConsumePartition("inventory", 0, 0)
-		if err != nil {
-			log.Println("Error: InventoryConsumer failed: ", err.Error())
-			return nil, err
-		}
-	}
-
-	return consumer, nil
-}
-
-func (h *inventoryQueueHandler) AddPlayerItem() {
-	ctx := context.Background()
-
-	consumer, err := h.InventoryConsumer(ctx)
-	if err != nil {
+		log.Printf("Error: inventory consumer: %s", err.Error())
 		return
 	}
 	defer consumer.Close()
 
-	log.Println("Start AddPlayerItem ...")
-
-	sigchan := make(chan os.Signal, 1)
-	signal.Notify(sigchan, syscall.SIGINT, syscall.SIGTERM)
-
+	log.Println("Start inventory consumer")
 	for {
 		select {
-		case err := <-consumer.Errors():
-			log.Println("Error: AddPlayerItem failed: ", err.Error())
-			continue
-		case msg := <-consumer.Messages():
-			if string(msg.Key) == "buy" {
-				h.inventoryUsecase.UpsertOffset(ctx, msg.Offset+1)
-
-				req := new(inventory.UpdateInventoryReq)
-
-				if err := queue.DecodeMessage(req, msg.Value); err != nil {
-					continue
-				}
-
-				h.inventoryUsecase.AddPlayerItemRes(ctx, h.cfg, req)
-
-				log.Printf("AddPlayerItem | Topic(%s)| Offset(%d) Message(%s) \n", msg.Topic, msg.Offset, string(msg.Value))
-			}
-		case <-sigchan:
-			log.Println("Stop AddPlayerItem...")
+		case <-ctx.Done():
+			log.Println("Stop inventory consumer")
 			return
+		case err, ok := <-consumer.Errors():
+			if ok && err != nil {
+				log.Printf("Error: inventory consumer: %s", err.Error())
+			}
+		case msg, ok := <-consumer.Messages():
+			if !ok {
+				return
+			}
+			h.handle(ctx, msg)
+			if err := h.inventoryUsecase.UpsertOffset(ctx, msg.Offset+1); err != nil {
+				log.Printf("Error: inventory offset: %s", err.Error())
+			}
 		}
 	}
 }
 
-func (h *inventoryQueueHandler) RollbackAddPlayerItem() {
-	ctx := context.Background()
-
-	consumer, err := h.InventoryConsumer(ctx)
-	if err != nil {
-		return
-	}
-	defer consumer.Close()
-
-	log.Println("Start RollbackAddPlayerItem ...")
-
-	sigchan := make(chan os.Signal, 1)
-	signal.Notify(sigchan, syscall.SIGINT, syscall.SIGTERM)
-
-	for {
-		select {
-		case err := <-consumer.Errors():
-			log.Println("Error: RollbackAddPlayerItem failed: ", err.Error())
-			continue
-		case msg := <-consumer.Messages():
-			if string(msg.Key) == "radd" {
-				h.inventoryUsecase.UpsertOffset(ctx, msg.Offset+1)
-
-				req := new(inventory.RollbackPlayerInventoryReq)
-
-				if err := queue.DecodeMessage(req, msg.Value); err != nil {
-					continue
-				}
-
-				h.inventoryUsecase.RollbackAddPlayerItem(ctx, h.cfg, req)
-
-				log.Printf("RollbackAddPlayerItem | Topic(%s)| Offset(%d) Message(%s) \n", msg.Topic, msg.Offset, string(msg.Value))
-			}
-		case <-sigchan:
-			log.Println("Stop RollbackAddPlayerItem...")
+func (h *inventoryQueueHandler) handle(ctx context.Context, msg *sarama.ConsumerMessage) {
+	switch string(msg.Key) {
+	case "buy":
+		req := new(inventory.UpdateInventoryReq)
+		if err := queue.DecodeMessage(req, msg.Value); err != nil {
+			log.Printf("Error: inventory buy decode offset %d: %s", msg.Offset, err.Error())
 			return
 		}
-	}
-}
-
-func (h *inventoryQueueHandler) RemovePlayerItem() {
-	ctx := context.Background()
-
-	consumer, err := h.InventoryConsumer(ctx)
-	if err != nil {
-		return
-	}
-	defer consumer.Close()
-
-	log.Println("Start RemovePlayerItem ...")
-
-	sigchan := make(chan os.Signal, 1)
-	signal.Notify(sigchan, syscall.SIGINT, syscall.SIGTERM)
-
-	for {
-		select {
-		case err := <-consumer.Errors():
-			log.Println("Error: RemovePlayerItem failed: ", err.Error())
-			continue
-		case msg := <-consumer.Messages():
-			if string(msg.Key) == "sell" {
-				h.inventoryUsecase.UpsertOffset(ctx, msg.Offset+1)
-
-				req := new(inventory.UpdateInventoryReq)
-
-				if err := queue.DecodeMessage(req, msg.Value); err != nil {
-					continue
-				}
-
-				h.inventoryUsecase.RemovePlayerItemRes(ctx, h.cfg, req)
-
-				log.Printf("RemovePlayerItem | Topic(%s)| Offset(%d) Message(%s) \n", msg.Topic, msg.Offset, string(msg.Value))
-			}
-		case <-sigchan:
-			log.Println("Stop RemovePlayerItem...")
+		h.inventoryUsecase.AddPlayerItemRes(ctx, h.cfg, req)
+	case "radd":
+		req := new(inventory.RollbackPlayerInventoryReq)
+		if err := queue.DecodeMessage(req, msg.Value); err != nil {
+			log.Printf("Error: inventory radd decode offset %d: %s", msg.Offset, err.Error())
 			return
 		}
-	}
-}
-
-func (h *inventoryQueueHandler) RollbackRemovePlayerItem() {
-	ctx := context.Background()
-
-	consumer, err := h.InventoryConsumer(ctx)
-	if err != nil {
-		return
-	}
-	defer consumer.Close()
-
-	log.Println("Start RollbackRemovePlayerItem ...")
-
-	sigchan := make(chan os.Signal, 1)
-	signal.Notify(sigchan, syscall.SIGINT, syscall.SIGTERM)
-
-	for {
-		select {
-		case err := <-consumer.Errors():
-			log.Println("Error: RollbackRemovePlayerItem failed: ", err.Error())
-			continue
-		case msg := <-consumer.Messages():
-			if string(msg.Key) == "rremove" {
-				h.inventoryUsecase.UpsertOffset(ctx, msg.Offset+1)
-
-				req := new(inventory.RollbackPlayerInventoryReq)
-
-				if err := queue.DecodeMessage(req, msg.Value); err != nil {
-					continue
-				}
-
-				h.inventoryUsecase.RollbackRemovePlayerItem(ctx, h.cfg, req)
-
-				log.Printf("RollbackRemovePlayerItem | Topic(%s)| Offset(%d) Message(%s) \n", msg.Topic, msg.Offset, string(msg.Value))
-			}
-		case <-sigchan:
-			log.Println("Stop RollbackRemovePlayerItem...")
+		h.inventoryUsecase.RollbackAddPlayerItem(ctx, h.cfg, req)
+	case "sell":
+		req := new(inventory.UpdateInventoryReq)
+		if err := queue.DecodeMessage(req, msg.Value); err != nil {
+			log.Printf("Error: inventory sell decode offset %d: %s", msg.Offset, err.Error())
 			return
 		}
+		h.inventoryUsecase.RemovePlayerItemRes(ctx, h.cfg, req)
+	case "rremove":
+		req := new(inventory.RollbackPlayerInventoryReq)
+		if err := queue.DecodeMessage(req, msg.Value); err != nil {
+			log.Printf("Error: inventory rremove decode offset %d: %s", msg.Offset, err.Error())
+			return
+		}
+		h.inventoryUsecase.RollbackRemovePlayerItem(ctx, h.cfg, req)
+	default:
+		log.Printf("Info: inventory skip key %s offset %d", string(msg.Key), msg.Offset)
 	}
 }

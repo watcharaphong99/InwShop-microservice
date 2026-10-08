@@ -31,6 +31,7 @@ type (
 		FindOnePlayerCredential(pctx context.Context, email string) (*player.Player, error)
 		FindOnePlayerProfileTokenRefresh(pctx context.Context, player_id string) (*player.Player, error)
 		DeleteOnePlayerTransaction(pctx context.Context, transactionId string) error
+		CancelPlayerTransaction(pctx context.Context, eventID, transactionID string) error
 		DockedPlayerMoneyRes(pctx context.Context, cfg *config.Config, req *payment.PaymentTransferRes) error
 		AddPlayerMoneyRes(pctx context.Context, cfg *config.Config, req *payment.PaymentTransferRes) error
 	}
@@ -41,7 +42,9 @@ type (
 )
 
 func NewPlayerRepository(db *mongo.Client) PlayerRepositoryService {
-	return &playerRepository{db: db}
+	repo := &playerRepository{db: db}
+	repo.ensureIndexes()
+	return repo
 }
 
 func (r *playerRepository) playerDbConn() *mongo.Database {
@@ -164,35 +167,127 @@ func (r *playerRepository) InsertOnePlayerTranscation(pctx context.Context, req 
 	db := r.playerDbConn()
 	col := db.Collection("player_transactions")
 
+	if req.EventId != "" && r.isTransactionCancelled(ctx, req.EventId) {
+		return primitive.NilObjectID, player.ErrEventCancelled
+	}
+
 	result, err := col.InsertOne(ctx, req)
 	if err != nil {
 		if mongo.IsDuplicateKeyError(err) {
-			return primitive.NewObjectID(), r.sameEventTransactionOrConflict(ctx, col, req)
+			return r.sameEventTransactionOrConflict(ctx, col, req)
 		}
 		log.Printf("Error: InseartOnePlayerTransaction: %s", err.Error())
-		return primitive.NewObjectID(), errors.New("error: insert one player transaction failed")
+		return primitive.NilObjectID, errors.New("error: insert one player transaction failed")
 	}
-	log.Printf("Result: InseartOnePlayerTransaction: %v", result.InsertedID)
 
-	return result.InsertedID.(primitive.ObjectID), nil
+	insertedID := result.InsertedID.(primitive.ObjectID)
+	if req.EventId != "" && r.isTransactionCancelled(ctx, req.EventId) {
+		if delErr := r.deleteTransactionByEventID(ctx, req.EventId); delErr != nil {
+			log.Printf("Error: delete cancelled transaction: %s", delErr.Error())
+		}
+		return primitive.NilObjectID, player.ErrEventCancelled
+	}
+
+	log.Printf("Result: InseartOnePlayerTransaction: %v", insertedID)
+	return insertedID, nil
 }
 
-func (r *playerRepository) sameEventTransactionOrConflict(ctx context.Context, col *mongo.Collection, req *player.PlayerTransaction) error {
+func (r *playerRepository) sameEventTransactionOrConflict(ctx context.Context, col *mongo.Collection, req *player.PlayerTransaction) (primitive.ObjectID, error) {
 	if req.EventId == "" {
-		return errors.New("error: insert one player transaction failed")
+		return primitive.NilObjectID, errors.New("error: insert one player transaction failed")
 	}
 
 	existing := new(player.PlayerTransaction)
 	if err := col.FindOne(ctx, bson.M{"event_id": req.EventId}).Decode(existing); err != nil {
 		log.Printf("Error: find player transaction by event_id: %s", err.Error())
-		return errors.New("error: insert one player transaction failed")
+		return primitive.NilObjectID, errors.New("error: insert one player transaction failed")
 	}
 	if !sameEventTransaction(existing, req) {
 		log.Printf("Error: event_id already used: %s", req.EventId)
-		return errors.New("error: event_id already used")
+		return primitive.NilObjectID, errors.New("error: event_id already used")
+	}
+	if r.isTransactionCancelled(ctx, req.EventId) {
+		if err := r.deleteTransactionByEventID(ctx, req.EventId); err != nil {
+			log.Printf("Error: delete cancelled transaction: %s", err.Error())
+		}
+		return primitive.NilObjectID, player.ErrEventCancelled
 	}
 
 	log.Printf("Info: InseartOnePlayerTransaction duplicate event_id: %s", req.EventId)
+	return existing.Id, nil
+}
+
+func (r *playerRepository) CancelPlayerTransaction(pctx context.Context, eventID, transactionID string) error {
+	ctx, cancel := context.WithTimeout(pctx, 10*time.Second)
+	defer cancel()
+
+	if eventID != "" {
+		if err := r.markTransactionCancelled(ctx, eventID); err != nil {
+			return err
+		}
+		if err := r.deleteTransactionByEventID(ctx, eventID); err != nil {
+			return err
+		}
+	}
+	if transactionID != "" {
+		if err := r.DeleteOnePlayerTransaction(pctx, transactionID); err != nil {
+			log.Printf("Error: delete transaction %s: %s", transactionID, err.Error())
+		}
+	}
+	return nil
+}
+
+func (r *playerRepository) ensureIndexes() {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	db := r.playerDbConn()
+	if _, err := db.Collection("player_transactions").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "event_id", Value: 1}},
+		Options: options.Index().SetUnique(true).SetSparse(true),
+	}); err != nil {
+		log.Printf("Error: player transaction event index: %s", err.Error())
+	}
+	if _, err := db.Collection("player_tx_cancels").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "event_id", Value: 1}},
+		Options: options.Index().SetUnique(true),
+	}); err != nil {
+		log.Printf("Error: player cancel index: %s", err.Error())
+	}
+}
+
+func (r *playerRepository) markTransactionCancelled(ctx context.Context, eventID string) error {
+	_, err := r.playerDbConn().Collection("player_tx_cancels").UpdateOne(
+		ctx,
+		bson.M{"event_id": eventID},
+		bson.M{"$setOnInsert": bson.M{"event_id": eventID}},
+		options.Update().SetUpsert(true),
+	)
+	if err != nil {
+		log.Printf("Error: mark transaction cancelled: %s", err.Error())
+		return errors.New("error: cancel transaction failed")
+	}
+	return nil
+}
+
+func (r *playerRepository) isTransactionCancelled(ctx context.Context, eventID string) bool {
+	err := r.playerDbConn().Collection("player_tx_cancels").FindOne(ctx, bson.M{"event_id": eventID}).Err()
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return false
+	}
+	log.Printf("Error: read transaction cancel: %s", err.Error())
+	return true
+}
+
+func (r *playerRepository) deleteTransactionByEventID(ctx context.Context, eventID string) error {
+	_, err := r.playerDbConn().Collection("player_transactions").DeleteOne(ctx, bson.M{"event_id": eventID})
+	if err != nil {
+		log.Printf("Error: delete transaction by event_id: %s", err.Error())
+		return errors.New("error: delete transaction failed")
+	}
 	return nil
 }
 

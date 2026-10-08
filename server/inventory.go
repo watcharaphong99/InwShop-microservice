@@ -17,10 +17,7 @@ func (s *server) inventoryService() {
 	grpcHandler := inventoryHandler.NewInventoryGrpcHandler(usecase)
 	queueHandler := inventoryHandler.NewInventoryQueueHandler(s.cfg, usecase)
 
-	go queueHandler.AddPlayerItem()
-	go queueHandler.RollbackAddPlayerItem()
-	go queueHandler.RemovePlayerItem()
-	go queueHandler.RollbackRemovePlayerItem()
+	go queueHandler.Listen()
 
 	//gRpc
 	go func() {

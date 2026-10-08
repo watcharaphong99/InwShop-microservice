@@ -3,7 +3,6 @@ package playerHandler
 import (
 	"context"
 	"log"
-	"os"
 	"os/signal"
 	"syscall"
 
@@ -16,9 +15,7 @@ import (
 
 type (
 	PlayerQueueHandlerService interface {
-		DockedPlayerMoney()
-		AddPlayerMoney()
-		RollbackPlayerTransaction()
+		Listen()
 	}
 
 	playerQueueHandler struct {
@@ -34,146 +31,76 @@ func NewPlayerQueueHandler(cfg *config.Config, playerUsecase playerUsecase.Playe
 	}
 }
 
-func (h *playerQueueHandler) PlayerConsumer(pctx context.Context) (sarama.PartitionConsumer, error) {
+func (h *playerQueueHandler) Listen() {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	worker, err := queue.ConnectConsumer([]string{h.cfg.Kafka.Url}, h.cfg.Kafka.ApiKey, h.cfg.Kafka.Secret)
 	if err != nil {
-		return nil, err
+		log.Printf("Error: player consumer connect: %s", err.Error())
+		return
+	}
+	defer worker.Close()
+
+	offset, err := h.playerUsecase.GetOffset(ctx)
+	if err != nil {
+		log.Printf("Error: player offset: %s", err.Error())
+		return
 	}
 
-	offset, err := h.playerUsecase.GetOffset(pctx)
+	consumer, err := queue.ConsumeFromStoredOffset(worker, "player", offset)
 	if err != nil {
-		return nil, err
-	}
-
-	consumer, err := worker.ConsumePartition("player", 0, offset)
-	if err != nil {
-		log.Println("Trying to set offset as 0")
-		consumer, err = worker.ConsumePartition("player", 0, 0)
-		if err != nil {
-			log.Println("Error: PaymentConsumer failed: ", err.Error())
-			return nil, err
-		}
-	}
-
-	return consumer, nil
-}
-
-func (h *playerQueueHandler) DockedPlayerMoney() {
-	ctx := context.Background()
-
-	consumer, err := h.PlayerConsumer(ctx)
-	if err != nil {
+		log.Printf("Error: player consumer: %s", err.Error())
 		return
 	}
 	defer consumer.Close()
 
-	log.Println("Start DockedPlayerMoney ...")
-
-	sigchan := make(chan os.Signal, 1)
-	signal.Notify(sigchan, syscall.SIGINT, syscall.SIGTERM)
-
-	for {
-		select { //select จะ block รอ จนกว่าจะมีข้อมูลเข้ามาจาก channel ใด channel หนึ่งใน 3 ทาง
-		case err := <-consumer.Errors():
-			log.Println("Error: DockedPlayerMoney failed: ", err.Error())
-			continue
-		case msg := <-consumer.Messages():
-			if string(msg.Key) == "buy" {
-				h.playerUsecase.UpsertOffset(ctx, msg.Offset+1)
-
-				req := new(player.CreatePlayerTransactionReq)
-
-				if err := queue.DecodeMessage(req, msg.Value); err != nil {
-					continue
-				}
-
-				h.playerUsecase.DockedPlayerMoneyRes(ctx, h.cfg, req)
-
-				log.Printf("DockedPlayerMoney | Topic(%s)| Offset(%d) Message(%s) \n", msg.Topic, msg.Offset, string(msg.Value))
-			}
-		case <-sigchan:
-			log.Println("Stop DockedPlayerMoney...")
-			return
-		}
-	}
-}
-
-func (h *playerQueueHandler) AddPlayerMoney() {
-	ctx := context.Background()
-
-	consumer, err := h.PlayerConsumer(ctx)
-	if err != nil {
-		return
-	}
-	defer consumer.Close()
-
-	log.Println("Start AddPlayerMoney ...")
-
-	sigchan := make(chan os.Signal, 1)
-	signal.Notify(sigchan, syscall.SIGINT, syscall.SIGTERM)
-
+	log.Println("Start player consumer")
 	for {
 		select {
-		case err := <-consumer.Errors():
-			log.Println("Error: AddPlayerMoney failed: ", err.Error())
-			continue
-		case msg := <-consumer.Messages():
-			if string(msg.Key) == "sell" {
-				h.playerUsecase.UpsertOffset(ctx, msg.Offset+1)
-
-				req := new(player.CreatePlayerTransactionReq)
-
-				if err := queue.DecodeMessage(req, msg.Value); err != nil {
-					continue
-				}
-
-				h.playerUsecase.AddPlayerMoneyRes(ctx, h.cfg, req)
-
-				log.Printf("AddPlayerMoney | Topic(%s)| Offset(%d) Message(%s) \n", msg.Topic, msg.Offset, string(msg.Value))
-			}
-		case <-sigchan:
-			log.Println("Stop AddPlayerMoney...")
+		case <-ctx.Done():
+			log.Println("Stop player consumer")
 			return
+		case err, ok := <-consumer.Errors():
+			if ok && err != nil {
+				log.Printf("Error: player consumer: %s", err.Error())
+			}
+		case msg, ok := <-consumer.Messages():
+			if !ok {
+				return
+			}
+			h.handle(ctx, msg)
+			if err := h.playerUsecase.UpsertOffset(ctx, msg.Offset+1); err != nil {
+				log.Printf("Error: player offset: %s", err.Error())
+			}
 		}
 	}
 }
 
-func (h *playerQueueHandler) RollbackPlayerTransaction() {
-	ctx := context.Background()
-
-	consumer, err := h.PlayerConsumer(ctx)
-	if err != nil {
-		return
-	}
-	defer consumer.Close()
-
-	log.Println("Start RollbackPlayerTransaction ...")
-
-	sigchan := make(chan os.Signal, 1)
-	signal.Notify(sigchan, syscall.SIGINT, syscall.SIGTERM)
-
-	for {
-		select {
-		case err := <-consumer.Errors():
-			log.Println("Error: RollbackPlayerTransaction failed: ", err.Error())
-			continue
-		case msg := <-consumer.Messages():
-			if string(msg.Key) == "rtransaction" {
-				h.playerUsecase.UpsertOffset(ctx, msg.Offset+1)
-
-				req := new(player.RollbackPlayerTransactionReq)
-
-				if err := queue.DecodeMessage(req, msg.Value); err != nil {
-					continue
-				}
-
-				h.playerUsecase.RollbackPlayerTransaction(ctx, req)
-
-				log.Printf("RollbackPlayerTransaction | Topic(%s)| Offset(%d) Message(%s) \n", msg.Topic, msg.Offset, string(msg.Value))
-			}
-		case <-sigchan:
-			log.Println("Stop RollbackPlayerTransaction...")
+func (h *playerQueueHandler) handle(ctx context.Context, msg *sarama.ConsumerMessage) {
+	switch string(msg.Key) {
+	case "buy":
+		req := new(player.CreatePlayerTransactionReq)
+		if err := queue.DecodeMessage(req, msg.Value); err != nil {
+			log.Printf("Error: player buy decode offset %d: %s", msg.Offset, err.Error())
 			return
 		}
+		h.playerUsecase.DockedPlayerMoneyRes(ctx, h.cfg, req)
+	case "sell":
+		req := new(player.CreatePlayerTransactionReq)
+		if err := queue.DecodeMessage(req, msg.Value); err != nil {
+			log.Printf("Error: player sell decode offset %d: %s", msg.Offset, err.Error())
+			return
+		}
+		h.playerUsecase.AddPlayerMoneyRes(ctx, h.cfg, req)
+	case "rtransaction":
+		req := new(player.RollbackPlayerTransactionReq)
+		if err := queue.DecodeMessage(req, msg.Value); err != nil {
+			log.Printf("Error: player rollback decode offset %d: %s", msg.Offset, err.Error())
+			return
+		}
+		h.playerUsecase.RollbackPlayerTransaction(ctx, req)
+	default:
+		log.Printf("Info: player skip key %s offset %d", string(msg.Key), msg.Offset)
 	}
 }

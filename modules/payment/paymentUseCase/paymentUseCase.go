@@ -2,10 +2,14 @@ package paymentUsecase
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"log"
+	"math"
+	"sync"
+	"time"
 
-	"github.com/IBM/sarama"
 	"github.com/watcharaphong99/InwzaShop/config"
 	"github.com/watcharaphong99/InwzaShop/modules/inventory"
 	"github.com/watcharaphong99/InwzaShop/modules/item"
@@ -13,7 +17,22 @@ import (
 	"github.com/watcharaphong99/InwzaShop/modules/payment"
 	"github.com/watcharaphong99/InwzaShop/modules/payment/paymentRepository"
 	"github.com/watcharaphong99/InwzaShop/modules/player"
-	queue "github.com/watcharaphong99/InwzaShop/pkg/kafka.go"
+)
+
+const (
+	paymentStepTimeout = 8 * time.Second
+	sagaStaleAfter     = 45 * time.Second
+
+	sagaRunning   = "running"
+	sagaCompleted = "completed"
+	sagaFailed    = "failed"
+	stepSent      = "sent"
+	stepDone      = "done"
+
+	stepDockMoney  = "dock_money"
+	stepAddMoney   = "add_money"
+	stepAddItem    = "add_item"
+	stepRemoveItem = "remove_item"
 )
 
 type (
@@ -21,18 +40,31 @@ type (
 		GetOffset(pctx context.Context) (int64, error)
 		UpserOffset(pctx context.Context, offset int64) error
 		FindItemsInIds(pctx context.Context, grpcUrl string, req []*payment.ItemServiceReqDatum) error
+		AcceptPaymentReply(res *payment.PaymentTransferRes)
+		RecoverStaleSagas(pctx context.Context, cfg *config.Config)
 		BuyItem(pctx context.Context, cfg *config.Config, playerId string, req *payment.ItemServiceReq) ([]*payment.PaymentTransferRes, error)
 		SellItem(pctx context.Context, cfg *config.Config, playerId string, req *payment.ItemServiceReq) ([]*payment.PaymentTransferRes, error)
 	}
 
 	paymentUsecase struct {
 		paymentRepository paymentRepository.PaymentRepositoryService
+		mu                sync.Mutex
+		waiters           map[string]chan *payment.PaymentTransferRes
+	}
+
+	paymentStep struct {
+		EventID       string
+		ItemID        string
+		Amount        float64
+		TransactionID string
+		InventoryID   string
 	}
 )
 
 func NewPaymentUsecase(paymentRepository paymentRepository.PaymentRepositoryService) PaymentUsecaseService {
 	return &paymentUsecase{
 		paymentRepository: paymentRepository,
+		waiters:           make(map[string]chan *payment.PaymentTransferRes),
 	}
 }
 
@@ -43,241 +75,393 @@ func (u *paymentUsecase) UpserOffset(pctx context.Context, offset int64) error {
 	return u.paymentRepository.UpsertOffset(pctx, offset)
 }
 
-func (u *paymentUsecase) PaymentConsumer(pctx context.Context, cfg *config.Config) (sarama.PartitionConsumer, error) {
-	worker, err := queue.ConnectConsumer([]string{cfg.Kafka.Url}, cfg.Kafka.ApiKey, cfg.Kafka.Secret)
-	if err != nil {
-		return nil, err
-	}
-
-	offset, err := u.paymentRepository.GetOffset(pctx)
-	if err != nil {
-		return nil, err
-	}
-
-	consumer, err := worker.ConsumePartition("payment", 0, offset)
-	if err != nil {
-		log.Println("Trying to set offset as 0")
-		consumer, err = worker.ConsumePartition("payment", 0, 0)
-		if err != nil {
-			log.Println("Error: PaymentConsumer failed: ", err.Error())
-			return nil, err
-		}
-	}
-
-	return consumer, nil
-}
-
-func (u *paymentUsecase) BuyOrSellConsumer(pctx context.Context, key string, cfg *config.Config, resCh chan<- *payment.PaymentTransferRes) {
-	consumer, err := u.PaymentConsumer(pctx, cfg)
-	if err != nil {
-		resCh <- nil
+func (u *paymentUsecase) AcceptPaymentReply(res *payment.PaymentTransferRes) {
+	if res == nil || res.EventId == "" {
+		log.Printf("Error: payment reply missing event_id")
 		return
 	}
-	defer consumer.Close()
 
-	log.Println("Start BuyOrSellConsumer ...")
+	u.mu.Lock()
+	ch := u.waiters[res.EventId]
+	u.mu.Unlock()
+	if ch == nil {
+		log.Printf("Info: payment reply event_id=%s has no waiter", res.EventId)
+		return
+	}
 
 	select {
-	case err := <-consumer.Errors():
-		log.Println("Error: BuyOrSellConsumer failed: ", err.Error())
-		resCh <- nil
-		return
-	case msg := <-consumer.Messages():
-		if string(msg.Key) == key {
-			u.UpserOffset(pctx, msg.Offset+1)
+	case ch <- res:
+	default:
+		log.Printf("Error: payment reply event_id=%s dropped", res.EventId)
+	}
+}
 
-			req := new(payment.PaymentTransferRes)
+func (u *paymentUsecase) register(eventID string) <-chan *payment.PaymentTransferRes {
+	ch := make(chan *payment.PaymentTransferRes, 1)
+	u.mu.Lock()
+	u.waiters[eventID] = ch
+	u.mu.Unlock()
+	return ch
+}
 
-			if err := queue.DecodeMessage(req, msg.Value); err != nil {
-				resCh <- nil
-				return
-			}
+func (u *paymentUsecase) unregister(eventID string) {
+	u.mu.Lock()
+	delete(u.waiters, eventID)
+	u.mu.Unlock()
+}
 
-			resCh <- req
-			log.Printf("BuyOrSellConsumer | Topic(%s)| Offset(%d) Message(%s) \n", msg.Topic, msg.Offset, string(msg.Value))
+func (u *paymentUsecase) waitReply(pctx context.Context, eventID string, ch <-chan *payment.PaymentTransferRes) (*payment.PaymentTransferRes, error) {
+	timer := time.NewTimer(paymentStepTimeout)
+	defer timer.Stop()
+
+	select {
+	case <-pctx.Done():
+		return nil, errors.New("error: payment step cancelled")
+	case <-timer.C:
+		return nil, errors.New("error: payment step timeout")
+	case res := <-ch:
+		if res == nil || res.EventId != eventID {
+			return nil, errors.New("error: payment reply mismatch")
 		}
+		return res, nil
 	}
 }
 
 func (u *paymentUsecase) BuyItem(pctx context.Context, cfg *config.Config, playerId string, req *payment.ItemServiceReq) ([]*payment.PaymentTransferRes, error) {
-	if err := u.FindItemsInIds(pctx, cfg.Grpc.ItemUrl, req.Items); err != nil {
+	if err := u.prepareItems(pctx, cfg, req); err != nil {
 		return nil, err
 	}
 
-	stage1 := make([]*payment.PaymentTransferRes, 0)
+	saga := &payment.Saga{ID: newEventID(), PlayerID: playerId, Action: "buy", Status: sagaRunning}
+	if err := u.saveSaga(saga); err != nil {
+		return nil, errors.New("error: buy item failed")
+	}
+
 	for _, item := range req.Items {
-		u.paymentRepository.DockedPlayerMoney(pctx, cfg, &player.CreatePlayerTransactionReq{
-			PlayerId: playerId,
-			Amount:   -item.Price,
+		step := paymentStep{EventID: newEventID(), ItemID: item.ItemId, Amount: item.Price}
+		if err := u.trackStep(saga, step, stepDockMoney, stepSent); err != nil {
+			return nil, u.abortSaga(pctx, cfg, saga)
+		}
+		res, err := u.dockMoney(pctx, cfg, playerId, step)
+		if err != nil || res == nil || res.Error != "" {
+			u.logStep("buy dock money", step.EventID, res, err)
+			return nil, u.abortSaga(pctx, cfg, saga)
+		}
+		if err := u.finishStep(saga, res.TransactionId, ""); err != nil {
+			return nil, u.abortSaga(pctx, cfg, saga)
+		}
+	}
+
+	out := make([]*payment.PaymentTransferRes, 0, len(req.Items))
+	for _, paid := range doneSteps(saga, stepDockMoney) {
+		step := paymentStep{EventID: newEventID(), ItemID: paid.ItemID, Amount: paid.Amount, TransactionID: paid.TransactionID}
+		if err := u.trackStep(saga, step, stepAddItem, stepSent); err != nil {
+			return nil, u.abortSaga(pctx, cfg, saga)
+		}
+		res, err := u.addItem(pctx, cfg, playerId, step)
+		if err != nil || res == nil || res.Error != "" {
+			u.logStep("buy add item", step.EventID, res, err)
+			return nil, u.abortSaga(pctx, cfg, saga)
+		}
+		if err := u.finishStep(saga, paid.TransactionID, res.InventoryId); err != nil {
+			return nil, u.abortSaga(pctx, cfg, saga)
+		}
+		out = append(out, &payment.PaymentTransferRes{
+			EventId:       step.EventID,
+			InventoryId:   res.InventoryId,
+			TransactionId: paid.TransactionID,
+			PlayerId:      playerId,
+			ItemId:        paid.ItemID,
+			Amount:        paid.Amount,
 		})
-
-		resCh := make(chan *payment.PaymentTransferRes)
-
-		go u.BuyOrSellConsumer(pctx, "buy", cfg, resCh)
-
-		res := <-resCh
-		if res != nil {
-			log.Println(res)
-			stage1 = append(stage1, &payment.PaymentTransferRes{
-				InventoryId:   "",
-				TransactionId: res.TransactionId,
-				PlayerId:      playerId,
-				ItemId:        item.ItemId,
-				Amount:        item.Price,
-				Error:         res.Error,
-			})
-		}
 	}
 
-	for _, s1 := range stage1 {
-		if s1.Error != "" {
-			for _, ss1 := range stage1 {
-				u.paymentRepository.RollbackTransaction(pctx, cfg, &player.RollbackPlayerTransactionReq{
-					TransactionId: ss1.TransactionId,
-				})
-			}
-			return nil, errors.New("error: buy item failed")
-		}
-
+	saga.Status = sagaCompleted
+	if err := u.saveSaga(saga); err != nil {
+		return nil, u.abortSaga(pctx, cfg, saga)
 	}
-
-	stage2 := make([]*payment.PaymentTransferRes, 0)
-	for _, s1 := range stage1 {
-		u.paymentRepository.AddPlayerItem(pctx, cfg, &inventory.UpdateInventoryReq{
-			PlayerId: playerId,
-			ItemId:   s1.ItemId,
-		})
-
-		resCh := make(chan *payment.PaymentTransferRes)
-
-		go u.BuyOrSellConsumer(pctx, "buy", cfg, resCh)
-
-		res := <-resCh
-		if res != nil {
-			log.Println(res)
-			stage2 = append(stage2, &payment.PaymentTransferRes{
-				InventoryId:   res.InventoryId,
-				TransactionId: s1.TransactionId,
-				PlayerId:      playerId,
-				ItemId:        s1.ItemId,
-				Amount:        s1.Amount,
-				Error:         res.Error,
-			})
-		}
-	}
-
-	for _, s2 := range stage2 {
-		if s2.Error != "" {
-			for _, ss2 := range stage2 {
-				u.paymentRepository.RollbackAddPlayerItem(pctx, cfg, &inventory.RollbackPlayerInventoryReq{
-					InventoryId: ss2.InventoryId,
-				})
-			}
-
-			for _, ss2 := range stage2 {
-				u.paymentRepository.RollbackTransaction(pctx, cfg, &player.RollbackPlayerTransactionReq{
-					TransactionId: ss2.TransactionId,
-				})
-			}
-
-			return nil, errors.New("error: buy item failed")
-		}
-	}
-
-	return stage2, nil
+	return out, nil
 }
 
 func (u *paymentUsecase) SellItem(pctx context.Context, cfg *config.Config, playerId string, req *payment.ItemServiceReq) ([]*payment.PaymentTransferRes, error) {
-	if err := u.FindItemsInIds(pctx, cfg.Grpc.ItemUrl, req.Items); err != nil {
+	if err := u.prepareItems(pctx, cfg, req); err != nil {
 		return nil, err
 	}
 
-	stage1 := make([]*payment.PaymentTransferRes, 0)
+	saga := &payment.Saga{ID: newEventID(), PlayerID: playerId, Action: "sell", Status: sagaRunning}
+	if err := u.saveSaga(saga); err != nil {
+		return nil, errors.New("error: sell item failed")
+	}
+
 	for _, item := range req.Items {
-		u.paymentRepository.RemovePlayerItem(pctx, cfg, &inventory.UpdateInventoryReq{
-			PlayerId: playerId,
-			ItemId:   item.ItemId,
+		step := paymentStep{EventID: newEventID(), ItemID: item.ItemId, Amount: item.Price}
+		if err := u.trackStep(saga, step, stepRemoveItem, stepSent); err != nil {
+			return nil, u.abortSaga(pctx, cfg, saga)
+		}
+		res, err := u.removeItem(pctx, cfg, playerId, step)
+		if err != nil || res == nil || res.Error != "" {
+			u.logStep("sell remove item", step.EventID, res, err)
+			return nil, u.abortSaga(pctx, cfg, saga)
+		}
+		if err := u.finishStep(saga, "", ""); err != nil {
+			return nil, u.abortSaga(pctx, cfg, saga)
+		}
+	}
+
+	out := make([]*payment.PaymentTransferRes, 0, len(req.Items))
+	for _, item := range doneSteps(saga, stepRemoveItem) {
+		payout := sellPayout(item.Amount)
+		if payout <= 0 {
+			log.Printf("Error: sell payout is zero item_id=%s", item.ItemID)
+			return nil, u.abortSaga(pctx, cfg, saga)
+		}
+		step := paymentStep{EventID: newEventID(), ItemID: item.ItemID, Amount: payout}
+		if err := u.trackStep(saga, step, stepAddMoney, stepSent); err != nil {
+			return nil, u.abortSaga(pctx, cfg, saga)
+		}
+		res, err := u.addMoney(pctx, cfg, playerId, step)
+		if err != nil || res == nil || res.Error != "" {
+			u.logStep("sell add money", step.EventID, res, err)
+			return nil, u.abortSaga(pctx, cfg, saga)
+		}
+		if err := u.finishStep(saga, res.TransactionId, ""); err != nil {
+			return nil, u.abortSaga(pctx, cfg, saga)
+		}
+		out = append(out, &payment.PaymentTransferRes{
+			EventId:       step.EventID,
+			TransactionId: res.TransactionId,
+			PlayerId:      playerId,
+			ItemId:        item.ItemID,
+			Amount:        item.Amount,
 		})
-
-		resCh := make(chan *payment.PaymentTransferRes)
-
-		go u.BuyOrSellConsumer(pctx, "sell", cfg, resCh)
-
-		res := <-resCh
-		if res != nil {
-			log.Println(res)
-			stage1 = append(stage1, &payment.PaymentTransferRes{
-				InventoryId:   "",
-				TransactionId: "",
-				PlayerId:      playerId,
-				ItemId:        item.ItemId,
-				Amount:        item.Price,
-				Error:         res.Error,
-			})
-		}
 	}
 
-	for _, s1 := range stage1 {
-		if s1.Error != "" {
-			for _, ss1 := range stage1 {
-				if ss1.Error != "error: item not found" {
-					u.paymentRepository.RollbackRemovePlayerItem(pctx, cfg, &inventory.RollbackPlayerInventoryReq{
-						PlayerId: playerId,
-						ItemId:   ss1.ItemId,
-					})
-				}
-			}
-			return nil, errors.New("error: sell item failed")
+	saga.Status = sagaCompleted
+	if err := u.saveSaga(saga); err != nil {
+		return nil, u.abortSaga(pctx, cfg, saga)
+	}
+	return out, nil
+}
+
+func (u *paymentUsecase) RecoverStaleSagas(pctx context.Context, cfg *config.Config) {
+	sagas, err := u.paymentRepository.ListStaleSagas(pctx, time.Now().Add(-sagaStaleAfter))
+	if err != nil {
+		log.Printf("Error: recover saga: %s", err.Error())
+		return
+	}
+	for _, saga := range sagas {
+		log.Printf("Info: recover stale saga %s action=%s", saga.ID, saga.Action)
+		u.compensate(pctx, cfg, saga)
+		saga.Status = sagaFailed
+		if err := u.saveSaga(saga); err != nil {
+			log.Printf("Error: mark recovered saga %s: %s", saga.ID, err.Error())
 		}
 	}
+}
 
-	stage2 := make([]*payment.PaymentTransferRes, 0)
-	for _, s1 := range stage1 {
-		u.paymentRepository.AddPlayerMoney(pctx, cfg, &player.CreatePlayerTransactionReq{
-			PlayerId: playerId,
-			Amount:   s1.Amount * 0.5,
+func (u *paymentUsecase) trackStep(saga *payment.Saga, step paymentStep, kind, status string) error {
+	saga.Steps = append(saga.Steps, payment.SagaStep{
+		EventID:       step.EventID,
+		Kind:          kind,
+		ItemID:        step.ItemID,
+		Amount:        step.Amount,
+		TransactionID: step.TransactionID,
+		InventoryID:   step.InventoryID,
+		Status:        status,
+	})
+	return u.saveSaga(saga)
+}
+
+func (u *paymentUsecase) finishStep(saga *payment.Saga, transactionID, inventoryID string) error {
+	last := &saga.Steps[len(saga.Steps)-1]
+	last.Status = stepDone
+	if transactionID != "" {
+		last.TransactionID = transactionID
+	}
+	if inventoryID != "" {
+		last.InventoryID = inventoryID
+	}
+	return u.saveSaga(saga)
+}
+
+func (u *paymentUsecase) abortSaga(pctx context.Context, cfg *config.Config, saga *payment.Saga) error {
+	u.compensate(pctx, cfg, saga)
+	saga.Status = sagaFailed
+	if err := u.saveSaga(saga); err != nil {
+		log.Printf("Error: abort saga %s: %s", saga.ID, err.Error())
+	}
+	if saga.Action == "sell" {
+		return errors.New("error: sell item failed")
+	}
+	return errors.New("error: buy item failed")
+}
+
+func (u *paymentUsecase) compensate(pctx context.Context, cfg *config.Config, saga *payment.Saga) {
+	money := make([]paymentStep, 0)
+	added := make([]paymentStep, 0)
+	removed := make([]paymentStep, 0)
+	for _, step := range saga.Steps {
+		recorded := paymentStep{
+			EventID:       step.EventID,
+			ItemID:        step.ItemID,
+			Amount:        step.Amount,
+			TransactionID: step.TransactionID,
+			InventoryID:   step.InventoryID,
+		}
+		switch step.Kind {
+		case stepDockMoney, stepAddMoney:
+			money = append(money, recorded)
+		case stepAddItem:
+			added = append(added, recorded)
+		case stepRemoveItem:
+			removed = append(removed, recorded)
+		}
+	}
+	u.rollbackAddedItems(pctx, cfg, added)
+	u.rollbackRemovedItems(pctx, cfg, saga.PlayerID, removed)
+	u.rollbackMoney(pctx, cfg, money)
+}
+
+func (u *paymentUsecase) saveSaga(saga *payment.Saga) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := u.paymentRepository.SaveSaga(ctx, saga); err != nil {
+		log.Printf("Error: save saga %s: %s", saga.ID, err.Error())
+		return err
+	}
+	return nil
+}
+
+func doneSteps(saga *payment.Saga, kind string) []paymentStep {
+	steps := make([]paymentStep, 0)
+	for _, step := range saga.Steps {
+		if step.Kind != kind || step.Status != stepDone {
+			continue
+		}
+		steps = append(steps, paymentStep{
+			EventID:       step.EventID,
+			ItemID:        step.ItemID,
+			Amount:        step.Amount,
+			TransactionID: step.TransactionID,
+			InventoryID:   step.InventoryID,
 		})
+	}
+	return steps
+}
 
-		resCh := make(chan *payment.PaymentTransferRes)
-
-		go u.BuyOrSellConsumer(pctx, "sell", cfg, resCh)
-
-		res := <-resCh
-		if res != nil {
-			log.Println(res)
-			stage2 = append(stage2, &payment.PaymentTransferRes{
-				InventoryId:   "",
-				TransactionId: res.TransactionId,
-				PlayerId:      playerId,
-				ItemId:        s1.ItemId,
-				Amount:        s1.Amount,
-				Error:         res.Error,
-			})
+func (u *paymentUsecase) prepareItems(pctx context.Context, cfg *config.Config, req *payment.ItemServiceReq) error {
+	if req == nil || len(req.Items) == 0 {
+		return errors.New("error: items is empty")
+	}
+	if err := u.FindItemsInIds(pctx, cfg.Grpc.ItemUrl, req.Items); err != nil {
+		return err
+	}
+	for _, item := range req.Items {
+		if item.Price <= 0 {
+			return errors.New("error: item price is invalid")
 		}
 	}
+	return nil
+}
 
-	for _, s2 := range stage2 {
-		if s2.Error != "" {
-			for _, ss2 := range stage2 {
-				u.paymentRepository.RollbackTransaction(pctx, cfg, &player.RollbackPlayerTransactionReq{
-					TransactionId: ss2.TransactionId,
-				})
-			}
+func (u *paymentUsecase) dockMoney(pctx context.Context, cfg *config.Config, playerId string, step paymentStep) (*payment.PaymentTransferRes, error) {
+	ch := u.register(step.EventID)
+	defer u.unregister(step.EventID)
 
-			for _, ss2 := range stage2 {
-				if ss2.Error != "error: item not found" {
-					u.paymentRepository.RollbackRemovePlayerItem(pctx, cfg, &inventory.RollbackPlayerInventoryReq{
-						PlayerId: playerId,
-						ItemId:   ss2.ItemId,
-					})
-				}
-			}
+	if err := u.paymentRepository.DockedPlayerMoney(pctx, cfg, &player.CreatePlayerTransactionReq{
+		PlayerId: playerId,
+		Amount:   -step.Amount,
+		EventId:  step.EventID,
+	}); err != nil {
+		return nil, err
+	}
+	return u.waitReply(pctx, step.EventID, ch)
+}
 
-			return nil, errors.New("error: sell item failed")
+func (u *paymentUsecase) addMoney(pctx context.Context, cfg *config.Config, playerId string, step paymentStep) (*payment.PaymentTransferRes, error) {
+	ch := u.register(step.EventID)
+	defer u.unregister(step.EventID)
+
+	if err := u.paymentRepository.AddPlayerMoney(pctx, cfg, &player.CreatePlayerTransactionReq{
+		PlayerId: playerId,
+		Amount:   step.Amount,
+		EventId:  step.EventID,
+	}); err != nil {
+		return nil, err
+	}
+	return u.waitReply(pctx, step.EventID, ch)
+}
+
+func (u *paymentUsecase) addItem(pctx context.Context, cfg *config.Config, playerId string, step paymentStep) (*payment.PaymentTransferRes, error) {
+	ch := u.register(step.EventID)
+	defer u.unregister(step.EventID)
+
+	if err := u.paymentRepository.AddPlayerItem(pctx, cfg, &inventory.UpdateInventoryReq{
+		PlayerId: playerId,
+		ItemId:   step.ItemID,
+		EventId:  step.EventID,
+	}); err != nil {
+		return nil, err
+	}
+	return u.waitReply(pctx, step.EventID, ch)
+}
+
+func (u *paymentUsecase) removeItem(pctx context.Context, cfg *config.Config, playerId string, step paymentStep) (*payment.PaymentTransferRes, error) {
+	ch := u.register(step.EventID)
+	defer u.unregister(step.EventID)
+
+	if err := u.paymentRepository.RemovePlayerItem(pctx, cfg, &inventory.UpdateInventoryReq{
+		PlayerId: playerId,
+		ItemId:   step.ItemID,
+		EventId:  step.EventID,
+	}); err != nil {
+		return nil, err
+	}
+	return u.waitReply(pctx, step.EventID, ch)
+}
+
+func (u *paymentUsecase) rollbackMoney(pctx context.Context, cfg *config.Config, steps []paymentStep) {
+	for _, step := range steps {
+		if err := u.paymentRepository.RollbackTransaction(pctx, cfg, &player.RollbackPlayerTransactionReq{
+			TransactionId: step.TransactionID,
+			EventId:       step.EventID,
+		}); err != nil {
+			log.Printf("Error: rollback money event_id=%s: %s", step.EventID, err.Error())
 		}
 	}
+}
 
-	return stage2, nil
+func (u *paymentUsecase) rollbackAddedItems(pctx context.Context, cfg *config.Config, steps []paymentStep) {
+	for _, step := range steps {
+		if err := u.paymentRepository.RollbackAddPlayerItem(pctx, cfg, &inventory.RollbackPlayerInventoryReq{
+			InventoryId: step.InventoryID,
+			EventId:     step.EventID,
+		}); err != nil {
+			log.Printf("Error: rollback add item event_id=%s: %s", step.EventID, err.Error())
+		}
+	}
+}
+
+func (u *paymentUsecase) rollbackRemovedItems(pctx context.Context, cfg *config.Config, playerId string, steps []paymentStep) {
+	for _, step := range steps {
+		if err := u.paymentRepository.RollbackRemovePlayerItem(pctx, cfg, &inventory.RollbackPlayerInventoryReq{
+			PlayerId: playerId,
+			ItemId:   step.ItemID,
+			EventId:  step.EventID,
+		}); err != nil {
+			log.Printf("Error: rollback remove item event_id=%s: %s", step.EventID, err.Error())
+		}
+	}
+}
+
+func (u *paymentUsecase) logStep(step, eventID string, res *payment.PaymentTransferRes, err error) {
+	if err != nil {
+		log.Printf("Error: %s event_id=%s: %s", step, eventID, err.Error())
+		return
+	}
+	if res != nil && res.Error != "" {
+		log.Printf("Error: %s event_id=%s: %s", step, eventID, res.Error)
+	}
 }
 
 func (u *paymentUsecase) FindItemsInIds(pctx context.Context, grpcUrl string, req []*payment.ItemServiceReqDatum) error {
@@ -314,12 +498,25 @@ func (u *paymentUsecase) FindItemsInIds(pctx context.Context, grpcUrl string, re
 	}
 
 	for i := range req {
-		if _, ok := itemMaps[req[i].ItemId]; !ok {
-			log.Printf("Error: FindItemsInIds failed: %s", err.Error())
+		found, ok := itemMaps[req[i].ItemId]
+		if !ok {
+			log.Printf("Error: FindItemsInIds failed: item %s not found", req[i].ItemId)
 			return errors.New("error: items not found")
 		}
-		req[i].Price = itemMaps[req[i].ItemId].Price
+		req[i].Price = found.Price
 	}
 
 	return nil
+}
+
+func newEventID() string {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		log.Printf("Error: new event id: %s", err.Error())
+	}
+	return hex.EncodeToString(buf)
+}
+
+func sellPayout(price float64) float64 {
+	return math.Round(price*50) / 100
 }

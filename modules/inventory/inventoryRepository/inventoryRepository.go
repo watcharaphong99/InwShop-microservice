@@ -37,6 +37,9 @@ type (
 		DeleteOneInventory(pctx context.Context, inventoryId string) error
 		FindOnePlayerItem(pctx context.Context, playerId, itemId string) bool
 		DeleteOnePlayerItem(pctx context.Context, playerId, itemId string) error
+		RemovePlayerItemByEvent(pctx context.Context, playerId, itemId, eventID string) error
+		RollbackAddedItem(pctx context.Context, inventoryID, eventID string) error
+		RollbackRemovedItem(pctx context.Context, eventID string) error
 	}
 
 	inventoryRepository struct {
@@ -45,7 +48,9 @@ type (
 )
 
 func NewInventoryRepository(db *mongo.Client) InventoryRepositoryService {
-	return &inventoryRepository{db}
+	repo := &inventoryRepository{db}
+	repo.ensureIndexes()
+	return repo
 }
 
 func (r *inventoryRepository) inventoryDbConn(pctx context.Context) *mongo.Database {
@@ -61,6 +66,9 @@ func (r *inventoryRepository) GetOffset(pctx context.Context) (int64, error) {
 
 	result := new(models.KafkaOffset)
 	if err := col.FindOne(ctx, bson.M{}).Decode(result); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return -1, nil
+		}
 		log.Printf("Error: GetOffset failed: %s", err.Error())
 		return -1, errors.New("error: GetOffset failed")
 	}
@@ -154,7 +162,10 @@ func (r *inventoryRepository) CountPlayerItems(pctx context.Context, playerId st
 	db := r.inventoryDbConn(ctx)
 	col := db.Collection("players_inventory")
 
-	count, err := col.CountDocuments(ctx, bson.M{"player_id": playerId})
+	count, err := col.CountDocuments(ctx, bson.M{
+		"player_id":        playerId,
+		"removed_event_id": bson.M{"$exists": false},
+	})
 	if err != nil {
 		log.Printf("Error: CountPlayerItems failed: %s", err.Error())
 		return -1, errors.New("error: count player items failed")
@@ -170,13 +181,28 @@ func (r *inventoryRepository) InsertOnePlayerItem(pctx context.Context, req *inv
 	db := r.inventoryDbConn(ctx)
 	col := db.Collection("players_inventory")
 
+	if req.EventId != "" && r.isEventCancelled(ctx, req.EventId) {
+		return primitive.NilObjectID, inventory.ErrEventCancelled
+	}
+
 	result, err := col.InsertOne(ctx, req)
 	if err != nil {
+		if mongo.IsDuplicateKeyError(err) && req.EventId != "" {
+			return r.existingPlayerItem(ctx, req)
+		}
 		log.Printf("Error: InsertOnePlayerItem failed: %s", err.Error())
 		return primitive.NilObjectID, errors.New("error: insert player item failed")
 	}
 
-	return result.InsertedID.(primitive.ObjectID), nil
+	insertedID := result.InsertedID.(primitive.ObjectID)
+	if req.EventId != "" && r.isEventCancelled(ctx, req.EventId) {
+		if _, delErr := col.DeleteOne(ctx, bson.M{"event_id": req.EventId}); delErr != nil {
+			log.Printf("Error: delete cancelled item: %s", delErr.Error())
+		}
+		return primitive.NilObjectID, inventory.ErrEventCancelled
+	}
+
+	return insertedID, nil
 }
 
 func (r *inventoryRepository) DeleteOneInventory(pctx context.Context, inventoryId string) error {
@@ -227,7 +253,11 @@ func (r *inventoryRepository) FindOnePlayerItem(pctx context.Context, playerId, 
 
 	result := new(inventory.Inventory)
 
-	if err := col.FindOne(ctx, bson.M{"player_id": playerId, "item_id": itemId}).Decode(result); err != nil {
+	if err := col.FindOne(ctx, bson.M{
+		"player_id":        playerId,
+		"item_id":          itemId,
+		"removed_event_id": bson.M{"$exists": false},
+	}).Decode(result); err != nil {
 		log.Printf("Error: FindOnePlayerItem failed: %s", err.Error())
 		return false
 	}
@@ -270,6 +300,188 @@ func (r *inventoryRepository) RemovePlayerItemRes(pctx context.Context, cfg *con
 		return errors.New("error: docked player money res failed")
 	}
 
+	return nil
+}
+
+func (r *inventoryRepository) RemovePlayerItemByEvent(pctx context.Context, playerId, itemId, eventID string) error {
+	ctx, cancel := context.WithTimeout(pctx, 10*time.Second)
+	defer cancel()
+
+	if eventID == "" {
+		return errors.New("error: event_id is required")
+	}
+	if r.isEventCancelled(ctx, eventID) {
+		_ = r.clearRemoval(ctx, eventID)
+		return inventory.ErrEventCancelled
+	}
+	if r.removalExists(ctx, eventID) {
+		return nil
+	}
+
+	col := r.inventoryDbConn(ctx).Collection("players_inventory")
+	err := col.FindOneAndUpdate(
+		ctx,
+		bson.M{
+			"player_id":        playerId,
+			"item_id":          itemId,
+			"removed_event_id": bson.M{"$exists": false},
+		},
+		bson.M{"$set": bson.M{"removed_event_id": eventID}},
+		options.FindOneAndUpdate().SetReturnDocument(options.After),
+	).Err()
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		if r.removalExists(ctx, eventID) {
+			return nil
+		}
+		return inventory.ErrItemNotFound
+	}
+	if mongo.IsDuplicateKeyError(err) {
+		if r.removalExists(ctx, eventID) {
+			return nil
+		}
+		log.Printf("Error: RemovePlayerItemByEvent duplicate: %s", err.Error())
+		return errors.New("error: remove player item failed")
+	}
+	if err != nil {
+		log.Printf("Error: RemovePlayerItemByEvent failed: %s", err.Error())
+		return errors.New("error: remove player item failed")
+	}
+	if r.isEventCancelled(ctx, eventID) {
+		_ = r.clearRemoval(ctx, eventID)
+		return inventory.ErrEventCancelled
+	}
+	return nil
+}
+
+func (r *inventoryRepository) RollbackAddedItem(pctx context.Context, inventoryID, eventID string) error {
+	ctx, cancel := context.WithTimeout(pctx, 10*time.Second)
+	defer cancel()
+
+	col := r.inventoryDbConn(ctx).Collection("players_inventory")
+	if eventID != "" {
+		if err := r.markEventCancelled(ctx, eventID); err != nil {
+			return err
+		}
+		if _, err := col.DeleteOne(ctx, bson.M{"event_id": eventID}); err != nil {
+			log.Printf("Error: delete added item by event_id: %s", err.Error())
+			return errors.New("error: rollback add player item failed")
+		}
+	}
+	if inventoryID == "" {
+		return nil
+	}
+	if _, err := utils.ParseObjectId(inventoryID); err != nil {
+		return nil
+	}
+	return r.DeleteOneInventory(pctx, inventoryID)
+}
+
+func (r *inventoryRepository) RollbackRemovedItem(pctx context.Context, eventID string) error {
+	ctx, cancel := context.WithTimeout(pctx, 10*time.Second)
+	defer cancel()
+
+	if eventID == "" {
+		return errors.New("error: event_id is required")
+	}
+	if err := r.markEventCancelled(ctx, eventID); err != nil {
+		return err
+	}
+	return r.clearRemoval(ctx, eventID)
+}
+
+func (r *inventoryRepository) existingPlayerItem(ctx context.Context, req *inventory.Inventory) (primitive.ObjectID, error) {
+	existing := new(inventory.Inventory)
+	err := r.inventoryDbConn(ctx).Collection("players_inventory").FindOne(ctx, bson.M{"event_id": req.EventId}).Decode(existing)
+	if err != nil {
+		log.Printf("Error: find item by event_id: %s", err.Error())
+		return primitive.NilObjectID, errors.New("error: insert player item failed")
+	}
+	if existing.PlayerId != req.PlayerId || existing.ItemId != req.ItemId || existing.RemovedEventId != "" {
+		return primitive.NilObjectID, errors.New("error: event_id already used")
+	}
+	if r.isEventCancelled(ctx, req.EventId) {
+		if _, delErr := r.inventoryDbConn(ctx).Collection("players_inventory").DeleteOne(ctx, bson.M{"event_id": req.EventId}); delErr != nil {
+			log.Printf("Error: delete cancelled item: %s", delErr.Error())
+		}
+		return primitive.NilObjectID, inventory.ErrEventCancelled
+	}
+	return existing.Id, nil
+}
+
+func (r *inventoryRepository) ensureIndexes() {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	db := r.inventoryDbConn(ctx)
+	items := db.Collection("players_inventory")
+	if _, err := items.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "event_id", Value: 1}},
+		Options: options.Index().SetUnique(true).SetSparse(true),
+	}); err != nil {
+		log.Printf("Error: inventory event index: %s", err.Error())
+	}
+	if _, err := items.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "removed_event_id", Value: 1}},
+		Options: options.Index().SetUnique(true).SetSparse(true),
+	}); err != nil {
+		log.Printf("Error: inventory removal index: %s", err.Error())
+	}
+	if _, err := db.Collection("inventory_event_cancels").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "event_id", Value: 1}},
+		Options: options.Index().SetUnique(true),
+	}); err != nil {
+		log.Printf("Error: inventory cancel index: %s", err.Error())
+	}
+}
+
+func (r *inventoryRepository) markEventCancelled(ctx context.Context, eventID string) error {
+	_, err := r.inventoryDbConn(ctx).Collection("inventory_event_cancels").UpdateOne(
+		ctx,
+		bson.M{"event_id": eventID},
+		bson.M{"$setOnInsert": bson.M{"event_id": eventID}},
+		options.Update().SetUpsert(true),
+	)
+	if err != nil {
+		log.Printf("Error: mark inventory event cancelled: %s", err.Error())
+		return errors.New("error: cancel inventory event failed")
+	}
+	return nil
+}
+
+func (r *inventoryRepository) isEventCancelled(ctx context.Context, eventID string) bool {
+	err := r.inventoryDbConn(ctx).Collection("inventory_event_cancels").FindOne(ctx, bson.M{"event_id": eventID}).Err()
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return false
+	}
+	log.Printf("Error: read inventory cancel: %s", err.Error())
+	return true
+}
+
+func (r *inventoryRepository) removalExists(ctx context.Context, eventID string) bool {
+	err := r.inventoryDbConn(ctx).Collection("players_inventory").FindOne(ctx, bson.M{"removed_event_id": eventID}).Err()
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return false
+	}
+	log.Printf("Error: read inventory removal: %s", err.Error())
+	return false
+}
+
+func (r *inventoryRepository) clearRemoval(ctx context.Context, eventID string) error {
+	_, err := r.inventoryDbConn(ctx).Collection("players_inventory").UpdateOne(
+		ctx,
+		bson.M{"removed_event_id": eventID},
+		bson.M{"$unset": bson.M{"removed_event_id": ""}},
+	)
+	if err != nil {
+		log.Printf("Error: clear inventory removal: %s", err.Error())
+		return errors.New("error: rollback remove player item failed")
+	}
 	return nil
 }
 

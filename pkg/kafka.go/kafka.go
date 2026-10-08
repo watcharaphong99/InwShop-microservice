@@ -88,6 +88,21 @@ func ConnectConsumer(brokerUrls []string, apiKey, secret string) (sarama.Consume
 	return consumer, nil
 }
 
+func ConsumeFromStoredOffset(worker sarama.Consumer, topic string, offset int64) (sarama.PartitionConsumer, error) {
+	consumer, err := worker.ConsumePartition(topic, 0, offset)
+	if err == nil {
+		return consumer, nil
+	}
+
+	log.Printf("Error: consume topic %s from offset %d: %s", topic, offset, err.Error())
+	consumer, err = worker.ConsumePartition(topic, 0, sarama.OffsetNewest)
+	if err != nil {
+		log.Printf("Error: consume topic %s from newest: %s", topic, err.Error())
+		return nil, errors.New("error: consume partition failed")
+	}
+	return consumer, nil
+}
+
 func DecodeMessage(obj any, value []byte) error {
 	if err := json.Unmarshal(value, &obj); err != nil {
 		log.Printf("Error: Failed to decode message: %s", err.Error())

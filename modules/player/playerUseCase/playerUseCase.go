@@ -175,92 +175,83 @@ func (u *playerUsecase) FindOnePlayerProfileToRefresh(pctx context.Context, play
 }
 
 func (u *playerUsecase) DockedPlayerMoneyRes(pctx context.Context, cfg *config.Config, req *player.CreatePlayerTransactionReq) {
-	//Get saving account ตรวจสอบว่ามีเงินพอที่จะซื้อของมั้ย
-	savingAccount, err := u.playerRepository.GetPlayerSavingAccount(pctx, req.PlayerId)
-	if err != nil {
-		u.playerRepository.DockedPlayerMoneyRes(pctx, cfg, &payment.PaymentTransferRes{
-			InventoryId:   "",
-			TransactionId: "",
-			PlayerId:      req.PlayerId,
-			ItemId:        "",
-			Amount:        req.Amount,
-			Error:         err.Error(),
-		})
+	if req.EventId == "" {
+		log.Printf("Error: DockedPlayerMoneyRes missing event_id")
+		u.replyDockedMoney(pctx, cfg, req, "", "error: event_id is required")
 		return
 	}
 
-	// เงินพอมมั้ยที่จะซื้อของ
+	savingAccount, err := u.playerRepository.GetPlayerSavingAccount(pctx, req.PlayerId)
+	if err != nil {
+		u.replyDockedMoney(pctx, cfg, req, "", err.Error())
+		return
+	}
+
 	if savingAccount.Balance < math.Abs(req.Amount) {
-		log.Printf("Error: DockedPlayerMoneyRes failed: %s", "not enough money")
-		u.playerRepository.DockedPlayerMoneyRes(pctx, cfg, &payment.PaymentTransferRes{
-			InventoryId:   "",
-			TransactionId: "",
-			PlayerId:      req.PlayerId,
-			ItemId:        "",
-			Amount:        req.Amount,
-			Error:         "error: not enough money",
-		})
+		log.Printf("Error: DockedPlayerMoneyRes failed: not enough money")
+		u.replyDockedMoney(pctx, cfg, req, "", "error: not enough money")
 		return
 	}
 
 	transactionId, err := u.playerRepository.InsertOnePlayerTranscation(pctx, &player.PlayerTransaction{
 		PlayerId:  req.PlayerId,
 		Amount:    req.Amount,
+		EventId:   req.EventId,
 		CreatedAt: utils.LocalTime(),
 	})
-
 	if err != nil {
-		u.playerRepository.DockedPlayerMoneyRes(pctx, cfg, &payment.PaymentTransferRes{
-			InventoryId:   "",
-			TransactionId: "",
-			PlayerId:      req.PlayerId,
-			ItemId:        "",
-			Amount:        req.Amount,
-			Error:         err.Error(),
-		})
+		u.replyDockedMoney(pctx, cfg, req, "", err.Error())
 		return
 	}
 
-	u.playerRepository.DockedPlayerMoneyRes(pctx, cfg, &payment.PaymentTransferRes{
-		InventoryId:   "",
-		TransactionId: transactionId.Hex(),
-		PlayerId:      req.PlayerId,
-		ItemId:        "",
-		Amount:        req.Amount,
-		Error:         "",
-	})
-
+	u.replyDockedMoney(pctx, cfg, req, transactionId.Hex(), "")
 }
 
 func (u *playerUsecase) AddPlayerMoneyRes(pctx context.Context, cfg *config.Config, req *player.CreatePlayerTransactionReq) {
-	// Insert one player transaction
-	transactionId, err := u.playerRepository.InsertOnePlayerTranscation(pctx, &player.PlayerTransaction{
-		PlayerId:  req.PlayerId,
-		Amount:    req.Amount,
-		CreatedAt: utils.LocalTime(),
-	})
-	if err != nil {
-		u.playerRepository.AddPlayerMoneyRes(pctx, cfg, &payment.PaymentTransferRes{
-			InventoryId:   "",
-			TransactionId: "",
-			PlayerId:      req.PlayerId,
-			ItemId:        "",
-			Amount:        req.Amount,
-			Error:         err.Error(),
-		})
+	if req.EventId == "" {
+		log.Printf("Error: AddPlayerMoneyRes missing event_id")
+		u.replyAddedMoney(pctx, cfg, req, "", "error: event_id is required")
 		return
 	}
 
-	u.playerRepository.AddPlayerMoneyRes(pctx, cfg, &payment.PaymentTransferRes{
-		InventoryId:   "",
-		TransactionId: transactionId.Hex(),
-		PlayerId:      req.PlayerId,
-		ItemId:        "",
-		Amount:        req.Amount,
-		Error:         "",
+	transactionId, err := u.playerRepository.InsertOnePlayerTranscation(pctx, &player.PlayerTransaction{
+		PlayerId:  req.PlayerId,
+		Amount:    req.Amount,
+		EventId:   req.EventId,
+		CreatedAt: utils.LocalTime(),
 	})
+	if err != nil {
+		u.replyAddedMoney(pctx, cfg, req, "", err.Error())
+		return
+	}
+
+	u.replyAddedMoney(pctx, cfg, req, transactionId.Hex(), "")
 }
 
 func (u *playerUsecase) RollbackPlayerTransaction(pctx context.Context, req *player.RollbackPlayerTransactionReq) {
-	u.playerRepository.DeleteOnePlayerTransaction(pctx, req.TransactionId)
+	if err := u.playerRepository.CancelPlayerTransaction(pctx, req.EventId, req.TransactionId); err != nil {
+		log.Printf("Error: RollbackPlayerTransaction: %s", err.Error())
+	}
+}
+
+func (u *playerUsecase) replyDockedMoney(pctx context.Context, cfg *config.Config, req *player.CreatePlayerTransactionReq, transactionID, errMsg string) {
+	if err := u.playerRepository.DockedPlayerMoneyRes(pctx, cfg, moneyReply(req, transactionID, errMsg)); err != nil {
+		log.Printf("Error: DockedPlayerMoneyRes reply: %s", err.Error())
+	}
+}
+
+func (u *playerUsecase) replyAddedMoney(pctx context.Context, cfg *config.Config, req *player.CreatePlayerTransactionReq, transactionID, errMsg string) {
+	if err := u.playerRepository.AddPlayerMoneyRes(pctx, cfg, moneyReply(req, transactionID, errMsg)); err != nil {
+		log.Printf("Error: AddPlayerMoneyRes reply: %s", err.Error())
+	}
+}
+
+func moneyReply(req *player.CreatePlayerTransactionReq, transactionID, errMsg string) *payment.PaymentTransferRes {
+	return &payment.PaymentTransferRes{
+		EventId:       req.EventId,
+		TransactionId: transactionID,
+		PlayerId:      req.PlayerId,
+		Amount:        req.Amount,
+		Error:         errMsg,
+	}
 }

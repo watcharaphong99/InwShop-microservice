@@ -1,7 +1,6 @@
 package paymentHandler
 
 import (
-	"context"
 	"net/http"
 
 	"github.com/labstack/echo/v4"
@@ -32,21 +31,19 @@ func NewPaymentHttpHandler(cfg *config.Config, paymentUsecase paymentUsecase.Pay
 }
 
 func (h *paymentHttpHandler) BuyItem(c echo.Context) error {
-	ctx := context.Background()
-
-	wrapper := request.ContextWrapper(c)
-
-	playerId := c.Get("player_id").(string)
+	playerId, ok := c.Get("player_id").(string)
+	if !ok || playerId == "" {
+		return response.ErrResponse(c, http.StatusUnauthorized, "error: unauthorized")
+	}
 
 	req := &payment.ItemServiceReq{
 		Items: make([]*payment.ItemServiceReqDatum, 0),
 	}
-
-	if err := wrapper.Bind(req); err != nil {
+	if err := request.ContextWrapper(c).Bind(req); err != nil {
 		return response.ErrResponse(c, http.StatusBadRequest, err.Error())
 	}
 
-	res, err := h.paymentUsecase.BuyItem(ctx, h.cfg, playerId, req)
+	res, err := h.paymentUsecase.BuyItem(c.Request().Context(), h.cfg, playerId, req)
 	if err != nil {
 		return response.ErrResponse(c, http.StatusBadRequest, err.Error())
 	}
@@ -55,21 +52,19 @@ func (h *paymentHttpHandler) BuyItem(c echo.Context) error {
 }
 
 func (h *paymentHttpHandler) SellItem(c echo.Context) error {
-	ctx := context.Background()
-
-	wrapper := request.ContextWrapper(c)
-
-	playerId := c.Get("player_id").(string)
+	playerId, ok := c.Get("player_id").(string)
+	if !ok || playerId == "" {
+		return response.ErrResponse(c, http.StatusUnauthorized, "error: unauthorized")
+	}
 
 	req := &payment.ItemServiceReq{
 		Items: make([]*payment.ItemServiceReqDatum, 0),
 	}
-
-	if err := wrapper.Bind(req); err != nil {
+	if err := request.ContextWrapper(c).Bind(req); err != nil {
 		return response.ErrResponse(c, http.StatusBadRequest, err.Error())
 	}
 
-	res, err := h.paymentUsecase.SellItem(ctx, h.cfg, playerId, req)
+	res, err := h.paymentUsecase.SellItem(c.Request().Context(), h.cfg, playerId, req)
 	if err != nil {
 		return response.ErrResponse(c, http.StatusBadRequest, err.Error())
 	}
