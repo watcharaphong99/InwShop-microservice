@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"math"
 	"time"
 
 	"github.com/watcharaphong99/InwzaShop/config"
@@ -161,31 +162,90 @@ func (r *playerRepository) FindOnePlayerProfine(pctx context.Context, playerId s
 }
 
 func (r *playerRepository) InsertOnePlayerTranscation(pctx context.Context, req *player.PlayerTransaction) (primitive.ObjectID, error) {
-	ctx, cancle := context.WithTimeout(pctx, 10*time.Second)
-	defer cancle()
-
-	db := r.playerDbConn()
-	col := db.Collection("player_transactions")
+	ctx, cancel := context.WithTimeout(pctx, 10*time.Second)
+	defer cancel()
 
 	if req.EventId != "" && r.isTransactionCancelled(ctx, req.EventId) {
 		return primitive.NilObjectID, player.ErrEventCancelled
 	}
 
-	result, err := col.InsertOne(ctx, req)
+	// หัก/เติมเงิน: อัปเดต player_wallets แบบ atomic คู่กับ insert ledger ใน Mongo transaction
+	session, err := r.db.StartSession()
 	if err != nil {
-		if mongo.IsDuplicateKeyError(err) {
-			return r.sameEventTransactionOrConflict(ctx, col, req)
-		}
-		log.Printf("Error: InseartOnePlayerTransaction: %s", err.Error())
+		log.Printf("Error: player transaction session: %s", err.Error())
 		return primitive.NilObjectID, errors.New("error: insert one player transaction failed")
 	}
+	defer session.EndSession(ctx)
 
-	insertedID := result.InsertedID.(primitive.ObjectID)
-	if req.EventId != "" && r.isTransactionCancelled(ctx, req.EventId) {
-		if delErr := r.deleteTransactionByEventID(ctx, req.EventId); delErr != nil {
-			log.Printf("Error: delete cancelled transaction: %s", delErr.Error())
+	var insertedID primitive.ObjectID
+	_, err = session.WithTransaction(ctx, func(sc mongo.SessionContext) (interface{}, error) {
+		txCol := r.playerDbConn().Collection("player_transactions")
+		walletCol := r.playerDbConn().Collection("player_wallets")
+
+		if req.EventId != "" && r.isTransactionCancelled(sc, req.EventId) {
+			return nil, player.ErrEventCancelled
 		}
-		return primitive.NilObjectID, player.ErrEventCancelled
+
+		// idempotent retry: มี ledger ของ event นี้แล้ว — ไม่แตะ wallet ซ้ำ
+		if req.EventId != "" {
+			existing := new(player.PlayerTransaction)
+			if err := txCol.FindOne(sc, bson.M{"event_id": req.EventId}).Decode(existing); err == nil {
+				if !sameEventTransaction(existing, req) {
+					return nil, errors.New("error: event_id already used")
+				}
+				if r.isTransactionCancelled(sc, req.EventId) {
+					return nil, player.ErrEventCancelled
+				}
+				insertedID = existing.Id
+				return nil, nil
+			} else if !errors.Is(err, mongo.ErrNoDocuments) {
+				return nil, errors.New("error: insert one player transaction failed")
+			}
+		}
+
+		if err := r.applyWalletDelta(sc, walletCol, req.PlayerId, req.Amount); err != nil {
+			return nil, err
+		}
+
+		result, err := txCol.InsertOne(sc, req)
+		if err != nil {
+			if mongo.IsDuplicateKeyError(err) && req.EventId != "" {
+				// concurrent duplicate event_id: ย้อน wallet ที่เพิ่งหัก/เติม แล้วคืน transaction เดิม
+				if revErr := r.applyWalletDelta(sc, walletCol, req.PlayerId, -req.Amount); revErr != nil {
+					log.Printf("Error: reverse wallet on duplicate event: %s", revErr.Error())
+				}
+				id, dupErr := r.sameEventTransactionOrConflict(sc, txCol, req)
+				if dupErr != nil {
+					return nil, dupErr
+				}
+				insertedID = id
+				return nil, nil
+			}
+			log.Printf("Error: InseartOnePlayerTransaction: %s", err.Error())
+			return nil, errors.New("error: insert one player transaction failed")
+		}
+
+		insertedID = result.InsertedID.(primitive.ObjectID)
+		if req.EventId != "" && r.isTransactionCancelled(sc, req.EventId) {
+			if delErr := r.deleteTransactionByEventID(sc, req.EventId); delErr != nil {
+				log.Printf("Error: delete cancelled transaction: %s", delErr.Error())
+			}
+			if revErr := r.applyWalletDelta(sc, walletCol, req.PlayerId, -req.Amount); revErr != nil {
+				log.Printf("Error: reverse wallet on cancelled event: %s", revErr.Error())
+			}
+			return nil, player.ErrEventCancelled
+		}
+		return nil, nil
+	})
+	if err != nil {
+		if errors.Is(err, player.ErrEventCancelled) || errors.Is(err, player.ErrNotEnoughMoney) {
+			return primitive.NilObjectID, err
+		}
+		return primitive.NilObjectID, err
+	}
+
+	if insertedID == primitive.NilObjectID {
+		return primitive.NilObjectID, errors.New("error: insert one player transaction failed")
 	}
 
 	log.Printf("Result: InseartOnePlayerTransaction: %v", insertedID)
@@ -228,8 +288,7 @@ func (r *playerRepository) CancelPlayerTransaction(pctx context.Context, eventID
 		if err := r.deleteTransactionByEventID(ctx, eventID); err != nil {
 			return err
 		}
-	}
-	if transactionID != "" {
+	} else if transactionID != "" {
 		if err := r.DeleteOnePlayerTransaction(pctx, transactionID); err != nil {
 			log.Printf("Error: delete transaction %s: %s", transactionID, err.Error())
 		}
@@ -253,6 +312,13 @@ func (r *playerRepository) ensureIndexes() {
 		Options: options.Index().SetUnique(true),
 	}); err != nil {
 		log.Printf("Error: player cancel index: %s", err.Error())
+	}
+	// wallet ต่อ player — ใช้ FindOneAndUpdate หักเงินแบบ atomic
+	if _, err := db.Collection("player_wallets").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "player_id", Value: 1}},
+		Options: options.Index().SetUnique(true),
+	}); err != nil {
+		log.Printf("Error: player wallet index: %s", err.Error())
 	}
 }
 
@@ -283,12 +349,117 @@ func (r *playerRepository) isTransactionCancelled(ctx context.Context, eventID s
 }
 
 func (r *playerRepository) deleteTransactionByEventID(ctx context.Context, eventID string) error {
-	_, err := r.playerDbConn().Collection("player_transactions").DeleteOne(ctx, bson.M{"event_id": eventID})
-	if err != nil {
+	txCol := r.playerDbConn().Collection("player_transactions")
+	walletCol := r.playerDbConn().Collection("player_wallets")
+
+	tx := new(player.PlayerTransaction)
+	if err := txCol.FindOne(ctx, bson.M{"event_id": eventID}).Decode(tx); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil
+		}
+		log.Printf("Error: find transaction by event_id: %s", err.Error())
+		return errors.New("error: delete transaction failed")
+	}
+
+	if _, err := txCol.DeleteOne(ctx, bson.M{"event_id": eventID}); err != nil {
 		log.Printf("Error: delete transaction by event_id: %s", err.Error())
 		return errors.New("error: delete transaction failed")
 	}
+
+	// rollback ledger แล้ว sync wallet ให้ตรง (ลบ amount -100 → คืน +100)
+	if err := r.applyWalletDelta(ctx, walletCol, tx.PlayerId, -tx.Amount); err != nil {
+		log.Printf("Error: wallet sync on delete event_id=%s: %s", eventID, err.Error())
+	}
 	return nil
+}
+
+// applyWalletDelta อัปเดตยอดใน player_wallets; หักเงินใช้เงื่อนไข balance >= จำนวนหัก
+func (r *playerRepository) applyWalletDelta(ctx context.Context, walletCol *mongo.Collection, playerId string, delta float64) error {
+	if delta == 0 {
+		return nil
+	}
+	if err := r.ensurePlayerWallet(ctx, walletCol, playerId); err != nil {
+		return err
+	}
+
+	if delta < 0 {
+		deduct := math.Abs(delta)
+		res := walletCol.FindOneAndUpdate(
+			ctx,
+			bson.M{"player_id": playerId, "balance": bson.M{"$gte": deduct}},
+			bson.M{"$inc": bson.M{"balance": delta}},
+		)
+		if err := res.Err(); err != nil {
+			if errors.Is(err, mongo.ErrNoDocuments) {
+				return player.ErrNotEnoughMoney
+			}
+			log.Printf("Error: wallet deduct: %s", err.Error())
+			return errors.New("error: insert one player transaction failed")
+		}
+		return nil
+	}
+
+	_, err := walletCol.UpdateOne(ctx, bson.M{"player_id": playerId}, bson.M{"$inc": bson.M{"balance": delta}})
+	if err != nil {
+		log.Printf("Error: wallet credit: %s", err.Error())
+		return errors.New("error: insert one player transaction failed")
+	}
+	return nil
+}
+
+func (r *playerRepository) ensurePlayerWallet(ctx context.Context, walletCol *mongo.Collection, playerId string) error {
+	if err := walletCol.FindOne(ctx, bson.M{"player_id": playerId}).Err(); err == nil {
+		return nil
+	} else if !errors.Is(err, mongo.ErrNoDocuments) {
+		log.Printf("Error: ensure wallet find: %s", err.Error())
+		return errors.New("error: insert one player transaction failed")
+	}
+
+	balance, err := r.ledgerBalance(ctx, playerId)
+	if err != nil {
+		return err
+	}
+
+	_, err = walletCol.UpdateOne(
+		ctx,
+		bson.M{"player_id": playerId},
+		bson.M{"$setOnInsert": bson.M{"player_id": playerId, "balance": balance}},
+		options.Update().SetUpsert(true),
+	)
+	if err != nil {
+		log.Printf("Error: ensure wallet upsert: %s", err.Error())
+		return errors.New("error: insert one player transaction failed")
+	}
+	return nil
+}
+
+func (r *playerRepository) ledgerBalance(ctx context.Context, playerId string) (float64, error) {
+	col := r.playerDbConn().Collection("player_transactions")
+	pipeline := bson.A{
+		bson.D{{Key: "$match", Value: bson.D{{Key: "player_id", Value: playerId}}}},
+		bson.D{{Key: "$group", Value: bson.D{
+			{Key: "_id", Value: nil},
+			{Key: "balance", Value: bson.D{{Key: "$sum", Value: "$amount"}}},
+		}}},
+	}
+
+	cursor, err := col.Aggregate(ctx, pipeline)
+	if err != nil {
+		log.Printf("Error: ledger balance aggregate: %s", err.Error())
+		return 0, errors.New("error: insert one player transaction failed")
+	}
+	defer cursor.Close(ctx)
+
+	var row struct {
+		Balance float64 `bson:"balance"`
+	}
+	if cursor.Next(ctx) {
+		if err := cursor.Decode(&row); err != nil {
+			return 0, errors.New("error: insert one player transaction failed")
+		}
+		return row.Balance, nil
+	}
+	return 0, nil
 }
 
 func sameEventTransaction(existing, incoming *player.PlayerTransaction) bool {
@@ -300,9 +471,20 @@ func (r *playerRepository) GetPlayerSavingAccount(pctx context.Context, playerId
 	defer cancle()
 
 	db := r.playerDbConn()
-	col := db.Collection("player_transactions")
+	walletCol := db.Collection("player_wallets")
 
 	log.Printf("playerId at Repository: %s", playerId)
+
+	// อ่านจาก wallet ก่อน ( sync กับหักเงิน atomic ); ไม่มี wallet ค่อย aggregate ledger เก่า
+	wallet := new(player.PlayerWallet)
+	if err := walletCol.FindOne(ctx, bson.M{"player_id": playerId}).Decode(wallet); err == nil {
+		return &player.PlayerSavingAccount{PlayerId: playerId, Balance: wallet.Balance}, nil
+	} else if !errors.Is(err, mongo.ErrNoDocuments) {
+		log.Printf("Error: GetPlayerSavingAccount wallet: %s", err.Error())
+		return nil, errors.New("error: failed to get player saving account")
+	}
+
+	col := db.Collection("player_transactions")
 
 	filter := bson.A{
 		bson.D{{Key: "$match", Value: bson.D{{Key: "player_id", Value: playerId}}}},
@@ -419,6 +601,15 @@ func (r *playerRepository) DeleteOnePlayerTransaction(pctx context.Context, tran
 
 	db := r.playerDbConn()
 	col := db.Collection("player_transactions")
+	walletCol := db.Collection("player_wallets")
+
+	tx := new(player.PlayerTransaction)
+	if err := col.FindOne(ctx, bson.M{"_id": objectId}).Decode(tx); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return errors.New("error: item not found")
+		}
+		return errors.New("error: delete one item failed")
+	}
 
 	result, err := col.DeleteOne(ctx, bson.M{"_id": objectId})
 	if err != nil {
@@ -428,6 +619,10 @@ func (r *playerRepository) DeleteOnePlayerTransaction(pctx context.Context, tran
 
 	if result.DeletedCount == 0 {
 		return errors.New("error: item not found")
+	}
+
+	if err := r.applyWalletDelta(ctx, walletCol, tx.PlayerId, -tx.Amount); err != nil {
+		log.Printf("Error: wallet sync on delete transaction %s: %s", transactionId, err.Error())
 	}
 
 	return nil

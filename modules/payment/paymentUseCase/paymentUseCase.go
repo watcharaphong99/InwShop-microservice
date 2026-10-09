@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log"
 	"math"
 	"sync"
@@ -20,8 +21,10 @@ import (
 )
 
 const (
-	paymentStepTimeout = 8 * time.Second
-	sagaStaleAfter     = 45 * time.Second
+	paymentStepTimeout  = 8 * time.Second
+	sagaStaleAfter      = 45 * time.Second
+	// SagaRecoverInterval ช่วงรัน RecoverStaleSagas ซ้ำ (stale saga loop)
+	SagaRecoverInterval = 1 * time.Minute
 
 	sagaRunning   = "running"
 	sagaCompleted = "completed"
@@ -128,36 +131,48 @@ func (u *paymentUsecase) waitReply(pctx context.Context, eventID string, ch <-ch
 }
 
 func (u *paymentUsecase) BuyItem(pctx context.Context, cfg *config.Config, playerId string, req *payment.ItemServiceReq) ([]*payment.PaymentTransferRes, error) {
+	// หาราคาของ ItemId
 	if err := u.prepareItems(pctx, cfg, req); err != nil {
 		return nil, err
 	}
 
+	//สร้าง newEventId เพื่อ save ใน saga
 	saga := &payment.Saga{ID: newEventID(), PlayerID: playerId, Action: "buy", Status: sagaRunning}
+	fmt.Println("print--sage", saga)
 	if err := u.saveSaga(saga); err != nil {
 		return nil, errors.New("error: buy item failed")
 	}
 
+	//ตัดเงิน ส่ง message เข้า kafka
 	for _, item := range req.Items {
+		// สร้าง step เพื่อเอาใว้ track
 		step := paymentStep{EventID: newEventID(), ItemID: item.ItemId, Amount: item.Price}
 		if err := u.trackStep(saga, step, stepDockMoney, stepSent); err != nil {
 			return nil, u.abortSaga(pctx, cfg, saga)
 		}
+		//ตัดเงิน
 		res, err := u.dockMoney(pctx, cfg, playerId, step)
 		if err != nil || res == nil || res.Error != "" {
 			u.logStep("buy dock money", step.EventID, res, err)
 			return nil, u.abortSaga(pctx, cfg, saga)
 		}
+
+		// เอาข้อมูลของ saga ไป save
 		if err := u.finishStep(saga, res.TransactionId, ""); err != nil {
 			return nil, u.abortSaga(pctx, cfg, saga)
 		}
 	}
 
+	//เอาของ เข้า กระเป๋า
 	out := make([]*payment.PaymentTransferRes, 0, len(req.Items))
 	for _, paid := range doneSteps(saga, stepDockMoney) {
+		// สร้าง step เพื่อเอาใว้ track
 		step := paymentStep{EventID: newEventID(), ItemID: paid.ItemID, Amount: paid.Amount, TransactionID: paid.TransactionID}
 		if err := u.trackStep(saga, step, stepAddItem, stepSent); err != nil {
 			return nil, u.abortSaga(pctx, cfg, saga)
 		}
+
+		//ส่งข้อมูล Item เข้า kafka โดยมี topic inventory
 		res, err := u.addItem(pctx, cfg, playerId, step)
 		if err != nil || res == nil || res.Error != "" {
 			u.logStep("buy add item", step.EventID, res, err)
@@ -243,6 +258,7 @@ func (u *paymentUsecase) SellItem(pctx context.Context, cfg *config.Config, play
 	return out, nil
 }
 
+// RecoverStaleSagas ชดเชย saga ที่ค้าง status running นานกว่า sagaStaleAfter (เรียกซ้ำจาก payment consumer loop)
 func (u *paymentUsecase) RecoverStaleSagas(pctx context.Context, cfg *config.Config) {
 	sagas, err := u.paymentRepository.ListStaleSagas(pctx, time.Now().Add(-sagaStaleAfter))
 	if err != nil {
@@ -301,6 +317,10 @@ func (u *paymentUsecase) compensate(pctx context.Context, cfg *config.Config, sa
 	added := make([]paymentStep, 0)
 	removed := make([]paymentStep, 0)
 	for _, step := range saga.Steps {
+		// rollback เฉพาะ step ที่ทำสำเร็จแล้ว (done) — ไม่ย้อน step ที่ค้างแค่ sent
+		if step.Status != stepDone {
+			continue
+		}
 		recorded := paymentStep{
 			EventID:       step.EventID,
 			ItemID:        step.ItemID,

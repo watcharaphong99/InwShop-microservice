@@ -37,4 +37,8 @@ type (
 	}
 )
 
-var ErrEventCancelled = errors.New("error: event cancelled")
+var (
+	ErrEventCancelled = errors.New("error: event cancelled")
+	// ErrNotEnoughMoney คืนเมื่อหักเงินแบบ atomic แล้วยอดใน wallet ไม่พอ
+	ErrNotEnoughMoney = errors.New("error: not enough money")
+)

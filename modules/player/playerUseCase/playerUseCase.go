@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log"
-	"math"
 	"time"
 
 	"github.com/watcharaphong99/InwzaShop/config"
@@ -181,18 +180,7 @@ func (u *playerUsecase) DockedPlayerMoneyRes(pctx context.Context, cfg *config.C
 		return
 	}
 
-	savingAccount, err := u.playerRepository.GetPlayerSavingAccount(pctx, req.PlayerId)
-	if err != nil {
-		u.replyDockedMoney(pctx, cfg, req, "", err.Error())
-		return
-	}
-
-	if savingAccount.Balance < math.Abs(req.Amount) {
-		log.Printf("Error: DockedPlayerMoneyRes failed: not enough money")
-		u.replyDockedMoney(pctx, cfg, req, "", "error: not enough money")
-		return
-	}
-
+	// หักเงินแบบ atomic ใน repository (wallet + ledger ใน transaction เดียว) — ไม่ read แล้ว insert แยก
 	transactionId, err := u.playerRepository.InsertOnePlayerTranscation(pctx, &player.PlayerTransaction{
 		PlayerId:  req.PlayerId,
 		Amount:    req.Amount,

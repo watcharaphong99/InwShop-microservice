@@ -5,6 +5,7 @@ import (
 	"log"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/IBM/sarama"
 	"github.com/watcharaphong99/InwzaShop/config"
@@ -56,7 +57,10 @@ func (h *paymentQueueHandler) Listen() {
 	defer consumer.Close()
 
 	log.Println("Start payment reply consumer")
+	// รัน recover saga ค้างทันทีตอนสตาร์ท แล้ววนซ้ำตาม interval (ไม่พึ่ง restart อย่างเดียว)
 	h.paymentUsecase.RecoverStaleSagas(ctx, h.config)
+	go h.runStaleSagaRecoveryLoop(ctx)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -71,6 +75,19 @@ func (h *paymentQueueHandler) Listen() {
 				return
 			}
 			h.accept(ctx, msg)
+		}
+	}
+}
+
+func (h *paymentQueueHandler) runStaleSagaRecoveryLoop(ctx context.Context) {
+	ticker := time.NewTicker(paymentUsecase.SagaRecoverInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			h.paymentUsecase.RecoverStaleSagas(ctx, h.config)
 		}
 	}
 }

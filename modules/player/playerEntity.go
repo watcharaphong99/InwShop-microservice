@@ -35,6 +35,12 @@ type (
 		Balance  float64 `json:"balance" bson:"balance"`
 	}
 
+	// PlayerWallet ยอดคงเหลือที่อัปเดตแบบ atomic ($inc) คู่กับ ledger ใน player_transactions
+	PlayerWallet struct {
+		PlayerId string  `bson:"player_id"`
+		Balance  float64 `bson:"balance"`
+	}
+
 	PlayerTransaction struct {
 		Id        primitive.ObjectID `bson:"_id,omitempty"`
 		PlayerId  string             `bson:"player_id"`
