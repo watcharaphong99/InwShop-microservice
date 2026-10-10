@@ -11,7 +11,7 @@ import (
 )
 
 func (s *server) playerService() {
-	repo := playerRepository.NewPlayerRepository(s.db)
+	repo := playerRepository.NewPlayerRepository(s.db, s.cache)
 	usecase := playerUsecase.NewPlayerUsecase(repo)
 	httpHandler := playerHandler.NewPlayerHttpHandlerService(s.cfg, usecase)
 	grpcHandler := playerHandler.NewPlayerGrpcHandler(usecase)

@@ -13,7 +13,7 @@ import (
 
 type (
 	PaymentHttpHandlerService interface {
-		BuyItem(c echo.Context) error
+		PlaceOrder(c echo.Context) error
 		SellItem(c echo.Context) error
 	}
 
@@ -30,7 +30,8 @@ func NewPaymentHttpHandler(cfg *config.Config, paymentUsecase paymentUsecase.Pay
 	}
 }
 
-func (h *paymentHttpHandler) BuyItem(c echo.Context) error {
+// PlaceOrder HTTP entry สำหรับซื้อ (เรียก ExecutePurchase)
+func (h *paymentHttpHandler) PlaceOrder(c echo.Context) error {
 	playerId, ok := c.Get("player_id").(string)
 	if !ok || playerId == "" {
 		return response.ErrResponse(c, http.StatusUnauthorized, "error: unauthorized")
@@ -43,7 +44,7 @@ func (h *paymentHttpHandler) BuyItem(c echo.Context) error {
 		return response.ErrResponse(c, http.StatusBadRequest, err.Error())
 	}
 
-	res, err := h.paymentUsecase.BuyItem(c.Request().Context(), h.cfg, playerId, req)
+	res, err := h.paymentUsecase.ExecutePurchase(c.Request().Context(), h.cfg, playerId, req)
 	if err != nil {
 		return response.ErrResponse(c, http.StatusBadRequest, err.Error())
 	}

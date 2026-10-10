@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/watcharaphong99/InwzaShop/config"
@@ -13,6 +14,7 @@ import (
 	"github.com/watcharaphong99/InwzaShop/modules/payment"
 	"github.com/watcharaphong99/InwzaShop/modules/player"
 	queue "github.com/watcharaphong99/InwzaShop/pkg/kafka.go"
+	"github.com/watcharaphong99/InwzaShop/pkg/rediscon"
 	"github.com/watcharaphong99/InwzaShop/pkg/utils"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -38,12 +40,13 @@ type (
 	}
 
 	playerRepository struct {
-		db *mongo.Client
+		db    *mongo.Client
+		cache *rediscon.Client
 	}
 )
 
-func NewPlayerRepository(db *mongo.Client) PlayerRepositoryService {
-	repo := &playerRepository{db: db}
+func NewPlayerRepository(db *mongo.Client, cache *rediscon.Client) PlayerRepositoryService {
+	repo := &playerRepository{db: db, cache: cache}
 	repo.ensureIndexes()
 	return repo
 }
@@ -125,7 +128,9 @@ func (r *playerRepository) InsertOnePlayer(pctx context.Context, req *player.Pla
 		return primitive.NewObjectID(), errors.New("error: insert one player failed")
 	}
 
-	return playerId.InsertedID.(primitive.ObjectID), nil
+	insertedID := playerId.InsertedID.(primitive.ObjectID)
+	r.cache.Del(ctx, rediscon.PlayerProfileKey(insertedID.Hex()))
+	return insertedID, nil
 
 }
 
@@ -137,12 +142,20 @@ func (r *playerRepository) FindOnePlayerProfine(pctx context.Context, playerId s
 	col := db.Collection("players")
 
 	result := new(player.PlayerProfileBson)
+	playerKey := strings.TrimPrefix(playerId, "player:")
+	lookupID := utils.ConvertToObjectId(playerKey)
+	if objectId, err := utils.ParseObjectId(playerKey); err == nil {
+		lookupID = objectId
+		if r.cache.GetJSON(ctx, rediscon.PlayerProfileKey(objectId.Hex()), result) {
+			return result, nil
+		}
+	}
 
 	log.Println("playerId", playerId)
 
 	if err := col.FindOne(
 		ctx,
-		bson.M{"_id": utils.ConvertToObjectId(playerId)},
+		bson.M{"_id": lookupID},
 		options.FindOne().SetProjection(
 			bson.M{
 				"_id":        1,
@@ -156,6 +169,8 @@ func (r *playerRepository) FindOnePlayerProfine(pctx context.Context, playerId s
 		log.Printf("Error: FindOnePlayerProfile: %s", err.Error())
 		return nil, errors.New("error: player profile not found")
 	}
+
+	r.cache.SetJSON(ctx, rediscon.PlayerProfileKey(result.Id.Hex()), result, rediscon.PlayerProfileTTL)
 
 	return result, nil
 

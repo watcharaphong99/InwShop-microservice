@@ -108,14 +108,25 @@ func (u *itemUsecase) FindManyItems(pctx context.Context, basePaginateUrl string
 	findItemsOpts = append(findItemsOpts, options.Find().SetSort(bson.D{{Key: "_id", Value: 1}}))
 	findItemsOpts = append(findItemsOpts, options.Find().SetLimit(int64(req.Limit)))
 
-	//Find
-	results, err := u.itemRepository.FindManyItems(pctx, findItemsFilter, findItemsOpts)
+	var (
+		results []*item.ItemShowCase
+		err     error
+	)
+	if req.Title == "" && req.Start == "" {
+		results, err = u.itemRepository.FindActiveItemsPage(pctx, req.Limit)
+	} else {
+		results, err = u.itemRepository.FindManyItems(pctx, findItemsFilter, findItemsOpts)
+	}
 	if err != nil {
 		return nil, err
 	}
 
-	//Count
-	total, err := u.itemRepository.CountItems(pctx, countItemsFilter)
+	var total int64
+	if req.Title == "" {
+		total, err = u.itemRepository.CountActiveItems(pctx)
+	} else {
+		total, err = u.itemRepository.CountItems(pctx, countItemsFilter)
+	}
 	if err != nil {
 		return nil, err
 	}

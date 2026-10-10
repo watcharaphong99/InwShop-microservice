@@ -23,7 +23,9 @@ type (
 		FindOneItem(pctx context.Context, itemId string) (*item.Item, error)
 		FindItemsInIds(pctx context.Context, objectIds []primitive.ObjectID) ([]*item.Item, error)
 		CountItems(pctx context.Context, filter primitive.D) (int64, error)
+		CountActiveItems(pctx context.Context) (int64, error)
 		FindManyItems(pctx context.Context, filter primitive.D, opts []*options.FindOptions) ([]*item.ItemShowCase, error)
+		FindActiveItemsPage(pctx context.Context, limit int) ([]*item.ItemShowCase, error)
 		UpdateOneItem(pctx context.Context, itemId string, req primitive.M) error
 		EnableOrDisableItem(pctx context.Context, itemId string, isActive bool) error
 		DeleteOneItem(pctx context.Context, itemId string) (int64, error)
@@ -73,6 +75,8 @@ func (r *itemRepository) InsertOneItem(pctx context.Context, req *item.Item) (pr
 		log.Printf("Error: InsertOneItem: %s", err.Error())
 		return primitive.NilObjectID, errors.New("error: insert one item failed")
 	}
+
+	r.invalidateActiveCatalog(ctx)
 
 	return itemId.InsertedID.(primitive.ObjectID), nil
 }
@@ -215,6 +219,28 @@ func (r *itemRepository) FindManyItems(pctx context.Context, filter primitive.D,
 	return results, nil
 }
 
+// FindActiveItemsPage คืนหน้าแรกของสินค้าที่เปิดขาย เรียงตาม _id ไม่กรองชื่อ
+func (r *itemRepository) FindActiveItemsPage(pctx context.Context, limit int) ([]*item.ItemShowCase, error) {
+	version := r.cache.GetCatalogVersion(pctx)
+	key := rediscon.ItemCatalogKey(version, limit)
+
+	cached := make([]*item.ItemShowCase, 0)
+	if r.cache.GetJSON(pctx, key, &cached) {
+		return cached, nil
+	}
+
+	results, err := r.FindManyItems(pctx, bson.D{{Key: "usage_status", Value: true}}, []*options.FindOptions{
+		options.Find().SetSort(bson.D{{Key: "_id", Value: 1}}),
+		options.Find().SetLimit(int64(limit)),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	r.cache.SetJSON(pctx, key, results, rediscon.ItemTTL)
+	return results, nil
+}
+
 func (r *itemRepository) CountItems(pctx context.Context, filter primitive.D) (int64, error) {
 
 	ctx, cancle := context.WithTimeout(pctx, 10*time.Second)
@@ -230,6 +256,28 @@ func (r *itemRepository) CountItems(pctx context.Context, filter primitive.D) (i
 	}
 
 	return count, nil
+}
+
+func (r *itemRepository) CountActiveItems(pctx context.Context) (int64, error) {
+	version := r.cache.GetCatalogVersion(pctx)
+	key := rediscon.ActiveItemCountKey(version)
+
+	var count int64
+	if r.cache.GetJSON(pctx, key, &count) {
+		return count, nil
+	}
+
+	count, err := r.CountItems(pctx, bson.D{{Key: "usage_status", Value: true}})
+	if err != nil {
+		return -1, err
+	}
+
+	r.cache.SetJSON(pctx, key, count, rediscon.ItemTTL)
+	return count, nil
+}
+
+func (r *itemRepository) invalidateActiveCatalog(ctx context.Context) {
+	r.cache.BumpCatalogVersion(ctx)
 }
 
 func (r *itemRepository) UpdateOneItem(pctx context.Context, itemId string, req primitive.M) error {
@@ -257,6 +305,7 @@ func (r *itemRepository) UpdateOneItem(pctx context.Context, itemId string, req 
 	log.Printf("UpdateOneItem result: %v", result.ModifiedCount)
 
 	r.cache.Del(ctx, rediscon.ItemKey(objectId.Hex()))
+	r.invalidateActiveCatalog(ctx)
 
 	return nil
 }
@@ -290,6 +339,7 @@ func (r *itemRepository) EnableOrDisableItem(pctx context.Context, itemId string
 	log.Printf("EnableOrDisableItem result: %v", result.ModifiedCount)
 
 	r.cache.Del(ctx, rediscon.ItemKey(objectId.Hex()))
+	r.invalidateActiveCatalog(ctx)
 
 	return nil
 }
@@ -317,6 +367,7 @@ func (r *itemRepository) DeleteOneItem(pctx context.Context, itemId string) (int
 	}
 
 	r.cache.Del(ctx, rediscon.ItemKey(objectId.Hex()))
+	r.invalidateActiveCatalog(ctx)
 
 	return result.DeletedCount, nil
 }

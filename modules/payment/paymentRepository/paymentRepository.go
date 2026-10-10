@@ -25,16 +25,16 @@ type (
 	PaymentRepositoryService interface {
 		GetOffset(pctx context.Context) (int64, error)
 		UpsertOffset(pctx context.Context, offset int64) error
-		FindItemsInIds(pctx context.Context, grpcUrl string, req *itemPb.FindItemsInIdsReq) (*itemPb.FindItemsInIdsRes, error)
-		DockedPlayerMoney(pctx context.Context, cfg *config.Config, req *player.CreatePlayerTransactionReq) error
+		FindProductsInCatalog(pctx context.Context, grpcUrl string, req *itemPb.FindItemsInIdsReq) (*itemPb.FindItemsInIdsRes, error)
+		CapturePayment(pctx context.Context, cfg *config.Config, req *player.CreatePlayerTransactionReq) error
 		RollbackTransaction(pctx context.Context, cfg *config.Config, req *player.RollbackPlayerTransactionReq) error
 		AddPlayerItem(pctx context.Context, cfg *config.Config, req *inventory.UpdateInventoryReq) error
 		RollbackAddPlayerItem(pctx context.Context, cfg *config.Config, req *inventory.RollbackPlayerInventoryReq) error
 		RemovePlayerItem(pctx context.Context, cfg *config.Config, req *inventory.UpdateInventoryReq) error
 		RollbackRemovePlayerItem(pctx context.Context, cfg *config.Config, req *inventory.RollbackPlayerInventoryReq) error
 		AddPlayerMoney(pctx context.Context, cfg *config.Config, req *player.CreatePlayerTransactionReq) error
-		SaveSaga(pctx context.Context, saga *payment.Saga) error
-		ListStaleSagas(pctx context.Context, olderThan time.Time) ([]*payment.Saga, error)
+		SaveOrderWorkflow(pctx context.Context, workflow *payment.OrderWorkflow) error
+		ListStaleOrderWorkflows(pctx context.Context, olderThan time.Time) ([]*payment.OrderWorkflow, error)
 	}
 
 	paymentRepository struct {
@@ -86,7 +86,8 @@ func (r *paymentRepository) UpsertOffset(pctx context.Context, offset int64) err
 	return nil
 }
 
-func (r *paymentRepository) FindItemsInIds(pctx context.Context, grpcUrl string, req *itemPb.FindItemsInIdsReq) (*itemPb.FindItemsInIdsRes, error) {
+// FindProductsInCatalog เรียก ProductCatalog / PricingService (Item gRPC FindItemsInIds)
+func (r *paymentRepository) FindProductsInCatalog(pctx context.Context, grpcUrl string, req *itemPb.FindItemsInIdsReq) (*itemPb.FindItemsInIdsRes, error) {
 	ctx, cancel := context.WithTimeout(pctx, 30*time.Second)
 	defer cancel()
 
@@ -112,11 +113,12 @@ func (r *paymentRepository) FindItemsInIds(pctx context.Context, grpcUrl string,
 	return result, nil
 }
 
-func (r *paymentRepository) DockedPlayerMoney(pctx context.Context, cfg *config.Config, req *player.CreatePlayerTransactionReq) error {
+// CapturePayment ส่งคำสั่งหักเงิน (เดิม DockedPlayerMoney / dock_money)
+func (r *paymentRepository) CapturePayment(pctx context.Context, cfg *config.Config, req *player.CreatePlayerTransactionReq) error {
 	reqInBytes, err := json.Marshal(req)
 	if err != nil {
-		log.Printf("Error: DockedPlayerMoney failed: %s", err.Error())
-		return errors.New("error: docked player money failed")
+		log.Printf("Error: CapturePayment failed: %s", err.Error())
+		return errors.New("error: capture payment failed")
 	}
 
 	if err := queue.PushMessageWithKeyToQueue(
@@ -127,8 +129,8 @@ func (r *paymentRepository) DockedPlayerMoney(pctx context.Context, cfg *config.
 		"buy",
 		reqInBytes,
 	); err != nil {
-		log.Printf("Error: DockedPlayerMoney failed: %s", err.Error())
-		return errors.New("error: docked player money failed")
+		log.Printf("Error: CapturePayment failed: %s", err.Error())
+		return errors.New("error: capture payment failed")
 	}
 
 	return nil
@@ -265,49 +267,55 @@ func (r *paymentRepository) RollbackRemovePlayerItem(pctx context.Context, cfg *
 	return nil
 }
 
-func (r *paymentRepository) SaveSaga(pctx context.Context, saga *payment.Saga) error {
+func (r *paymentRepository) SaveOrderWorkflow(pctx context.Context, workflow *payment.OrderWorkflow) error {
 	ctx, cancel := context.WithTimeout(pctx, 10*time.Second)
 	defer cancel()
 
-	saga.UpdatedAt = time.Now()
-	_, err := r.paymentDbConn().Collection("payment_sagas").ReplaceOne(
+	workflow.UpdatedAt = time.Now()
+	_, err := r.paymentDbConn().Collection("order_workflows").ReplaceOne(
 		ctx,
-		bson.M{"_id": saga.ID},
-		saga,
+		bson.M{"_id": workflow.ID},
+		workflow,
 		options.Replace().SetUpsert(true),
 	)
 	if err != nil {
-		log.Printf("Error: SaveSaga failed: %s", err.Error())
-		return errors.New("error: save saga failed")
+		log.Printf("Error: SaveOrderWorkflow failed: %s", err.Error())
+		return errors.New("error: save order workflow failed")
 	}
 	return nil
 }
 
-func (r *paymentRepository) ListStaleSagas(pctx context.Context, olderThan time.Time) ([]*payment.Saga, error) {
+func (r *paymentRepository) ListStaleOrderWorkflows(pctx context.Context, olderThan time.Time) ([]*payment.OrderWorkflow, error) {
 	ctx, cancel := context.WithTimeout(pctx, 10*time.Second)
 	defer cancel()
 
-	cursor, err := r.paymentDbConn().Collection("payment_sagas").Find(ctx, bson.M{
+	filter := bson.M{
 		"status":     "running",
 		"updated_at": bson.M{"$lt": olderThan},
-	})
-	if err != nil {
-		log.Printf("Error: ListStaleSagas failed: %s", err.Error())
-		return nil, errors.New("error: list saga failed")
 	}
-	defer cursor.Close(ctx)
-	sagas := make([]*payment.Saga, 0)
-	for cursor.Next(ctx) {
-		saga := new(payment.Saga)
-		if err := cursor.Decode(saga); err != nil {
-			log.Printf("Error: decode saga: %s", err.Error())
-			return nil, errors.New("error: list saga failed")
+
+	workflows := make([]*payment.OrderWorkflow, 0)
+	for _, collection := range []string{"order_workflows", "payment_sagas"} {
+		cursor, err := r.paymentDbConn().Collection(collection).Find(ctx, filter)
+		if err != nil {
+			log.Printf("Error: ListStaleOrderWorkflows %s: %s", collection, err.Error())
+			return nil, errors.New("error: list order workflow failed")
 		}
-		sagas = append(sagas, saga)
+		for cursor.Next(ctx) {
+			wf := new(payment.OrderWorkflow)
+			if err := cursor.Decode(wf); err != nil {
+				cursor.Close(ctx)
+				log.Printf("Error: decode order workflow: %s", err.Error())
+				return nil, errors.New("error: list order workflow failed")
+			}
+			workflows = append(workflows, wf)
+		}
+		if err := cursor.Err(); err != nil {
+			cursor.Close(ctx)
+			log.Printf("Error: ListStaleOrderWorkflows cursor: %s", err.Error())
+			return nil, errors.New("error: list order workflow failed")
+		}
+		cursor.Close(ctx)
 	}
-	if err := cursor.Err(); err != nil {
-		log.Printf("Error: ListStaleSagas cursor: %s", err.Error())
-		return nil, errors.New("error: list saga failed")
-	}
-	return sagas, nil
+	return workflows, nil
 }

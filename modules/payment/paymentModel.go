@@ -28,16 +28,17 @@ type (
 		Error         string  `json:"error"`
 	}
 
-	Saga struct {
-		ID        string     `bson:"_id"`
-		PlayerID  string     `bson:"player_id"`
-		Action    string     `bson:"action"`
-		Status    string     `bson:"status"`
-		Steps     []SagaStep `bson:"steps"`
-		UpdatedAt time.Time  `bson:"updated_at"`
+	// OrderWorkflow (เดิม Saga) — state ของ PlaceOrder / ExecutePurchase
+	OrderWorkflow struct {
+		ID        string              `bson:"_id"`
+		PlayerID  string              `bson:"player_id"`
+		Action    string              `bson:"action"`
+		Status    string              `bson:"status"`
+		Steps     []OrderWorkflowStep `bson:"steps"`
+		UpdatedAt time.Time           `bson:"updated_at"`
 	}
 
-	SagaStep struct {
+	OrderWorkflowStep struct {
 		EventID       string  `bson:"event_id"`
 		Kind          string  `bson:"kind"`
 		ItemID        string  `bson:"item_id"`

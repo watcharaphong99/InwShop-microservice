@@ -17,7 +17,7 @@ func (s *server) paymentService() {
 	//help check
 	payment.GET("", s.healthcheckService)
 
-	payment.POST("/payment/buy", httpHandler.BuyItem, s.middleware.JwtAuthorization)
+	payment.POST("/payment/buy", httpHandler.PlaceOrder, s.middleware.JwtAuthorization)
 	payment.POST("/payment/sell", httpHandler.SellItem, s.middleware.JwtAuthorization)
 
 }

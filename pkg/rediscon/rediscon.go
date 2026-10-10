@@ -18,6 +18,12 @@ const (
 	accessTokenPrefix = "auth:access:"
 	ItemTTL           = 10 * time.Minute
 	itemPrefix        = "item:one:"
+	itemCatalogPrefix = "item:catalog:"
+	itemCountPrefix   = "item:active:count:"
+	// itemCatalogVersionKey เพิ่มทุกครั้งที่สินค้าเปลี่ยน เพื่อทิ้งหน้าร้านที่แคชไว้
+	itemCatalogVersionKey = "item:catalog:version"
+	PlayerProfileTTL      = 24 * time.Hour
+	playerProfilePrefix   = "player:profile:"
 )
 
 type Client struct {
@@ -61,6 +67,18 @@ func AccessTokenKey(accessToken string) string {
 
 func ItemKey(itemId string) string {
 	return itemPrefix + itemId
+}
+
+func ItemCatalogKey(version int64, limit int) string {
+	return itemCatalogPrefix + strconv.FormatInt(version, 10) + ":" + strconv.Itoa(limit)
+}
+
+func ActiveItemCountKey(version int64) string {
+	return itemCountPrefix + strconv.FormatInt(version, 10)
+}
+
+func PlayerProfileKey(playerId string) string {
+	return playerProfilePrefix + playerId
 }
 
 func (c *Client) enabled() bool {
@@ -199,5 +217,33 @@ func (c *Client) SetRolesCount(ctx context.Context, count int64) {
 	}
 	if err := c.rdb.Set(ctx, RolesCountKey, strconv.FormatInt(count, 10), RolesCountTTL).Err(); err != nil {
 		log.Printf("redis: set roles count failed: %s", err.Error())
+	}
+}
+
+func (c *Client) GetCatalogVersion(ctx context.Context) int64 {
+	if !c.enabled() {
+		return 0
+	}
+	val, err := c.rdb.Get(ctx, itemCatalogVersionKey).Result()
+	if err != nil {
+		if err != redis.Nil {
+			log.Printf("redis: get catalog version failed: %s", err.Error())
+		}
+		return 0
+	}
+	version, err := strconv.ParseInt(val, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return version
+}
+
+// BumpCatalogVersion เลขเวอร์ชันใหม่ทำให้หน้าร้านและจำนวนสินค้าที่เปิดขายชุดเก่าไม่ถูกอ่านอีก
+func (c *Client) BumpCatalogVersion(ctx context.Context) {
+	if !c.enabled() {
+		return
+	}
+	if err := c.rdb.Incr(ctx, itemCatalogVersionKey).Err(); err != nil {
+		log.Printf("redis: bump catalog version failed: %s", err.Error())
 	}
 }

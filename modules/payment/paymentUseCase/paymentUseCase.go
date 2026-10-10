@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"log"
 	"math"
 	"sync"
@@ -21,31 +20,36 @@ import (
 )
 
 const (
-	paymentStepTimeout  = 8 * time.Second
-	sagaStaleAfter      = 45 * time.Second
-	// SagaRecoverInterval ช่วงรัน RecoverStaleSagas ซ้ำ (stale saga loop)
-	SagaRecoverInterval = 1 * time.Minute
+	paymentStepTimeout = 8 * time.Second
+	// orderWorkflowStaleAfter ระยะที่ถือว่า ProcessInstance ค้าง
+	orderWorkflowStaleAfter = 45 * time.Second
+	// OrderWorkflowRecoverInterval ช่วงรัน RecoverStaleOrderWorkflows ซ้ำ
+	OrderWorkflowRecoverInterval = 1 * time.Minute
 
-	sagaRunning   = "running"
-	sagaCompleted = "completed"
-	sagaFailed    = "failed"
-	stepSent      = "sent"
-	stepDone      = "done"
+	workflowRunning   = "running"
+	workflowCompleted = "completed"
+	workflowFailed    = "failed"
+	stepSent          = "sent"
+	stepDone          = "done"
 
-	stepDockMoney  = "dock_money"
-	stepAddMoney   = "add_money"
-	stepAddItem    = "add_item"
-	stepRemoveItem = "remove_item"
+	stepCapturePayment  = "capture_payment"   // เดิม dock_money
+	stepFulfillLineItem = "fulfill_line_item" // เดิม add_item
+	stepAddMoney        = "add_money"
+	stepRemoveItem      = "remove_item"
+
+	// legacy step kinds ใน Mongo ก่อน rename
+	stepCapturePaymentLegacy  = "dock_money"
+	stepFulfillLineItemLegacy = "add_item"
 )
 
 type (
 	PaymentUsecaseService interface {
 		GetOffset(pctx context.Context) (int64, error)
 		UpserOffset(pctx context.Context, offset int64) error
-		FindItemsInIds(pctx context.Context, grpcUrl string, req []*payment.ItemServiceReqDatum) error
+		ResolvePricingFromCatalog(pctx context.Context, grpcUrl string, req []*payment.ItemServiceReqDatum) error
 		AcceptPaymentReply(res *payment.PaymentTransferRes)
-		RecoverStaleSagas(pctx context.Context, cfg *config.Config)
-		BuyItem(pctx context.Context, cfg *config.Config, playerId string, req *payment.ItemServiceReq) ([]*payment.PaymentTransferRes, error)
+		RecoverStaleOrderWorkflows(pctx context.Context, cfg *config.Config)
+		ExecutePurchase(pctx context.Context, cfg *config.Config, playerId string, req *payment.ItemServiceReq) ([]*payment.PaymentTransferRes, error)
 		SellItem(pctx context.Context, cfg *config.Config, playerId string, req *payment.ItemServiceReq) ([]*payment.PaymentTransferRes, error)
 	}
 
@@ -130,56 +134,45 @@ func (u *paymentUsecase) waitReply(pctx context.Context, eventID string, ch <-ch
 	}
 }
 
-func (u *paymentUsecase) BuyItem(pctx context.Context, cfg *config.Config, playerId string, req *payment.ItemServiceReq) ([]*payment.PaymentTransferRes, error) {
-	// หาราคาของ ItemId
+// ExecutePurchase ดำเนินการซื้อ (เดิม BuyItem): CapturePayment แล้ว FulfillLineItem
+func (u *paymentUsecase) ExecutePurchase(pctx context.Context, cfg *config.Config, playerId string, req *payment.ItemServiceReq) ([]*payment.PaymentTransferRes, error) {
 	if err := u.prepareItems(pctx, cfg, req); err != nil {
 		return nil, err
 	}
 
-	//สร้าง newEventId เพื่อ save ใน saga
-	saga := &payment.Saga{ID: newEventID(), PlayerID: playerId, Action: "buy", Status: sagaRunning}
-	fmt.Println("print--sage", saga)
-	if err := u.saveSaga(saga); err != nil {
+	workflow := &payment.OrderWorkflow{ID: newEventID(), PlayerID: playerId, Action: "buy", Status: workflowRunning}
+	if err := u.saveOrderWorkflow(workflow); err != nil {
 		return nil, errors.New("error: buy item failed")
 	}
 
-	//ตัดเงิน ส่ง message เข้า kafka
 	for _, item := range req.Items {
-		// สร้าง step เพื่อเอาใว้ track
 		step := paymentStep{EventID: newEventID(), ItemID: item.ItemId, Amount: item.Price}
-		if err := u.trackStep(saga, step, stepDockMoney, stepSent); err != nil {
-			return nil, u.abortSaga(pctx, cfg, saga)
+		if err := u.trackStep(workflow, step, stepCapturePayment, stepSent); err != nil {
+			return nil, u.abortOrderWorkflow(pctx, cfg, workflow)
 		}
-		//ตัดเงิน
-		res, err := u.dockMoney(pctx, cfg, playerId, step)
+		res, err := u.capturePayment(pctx, cfg, playerId, step)
 		if err != nil || res == nil || res.Error != "" {
-			u.logStep("buy dock money", step.EventID, res, err)
-			return nil, u.abortSaga(pctx, cfg, saga)
+			u.logStep("capture payment", step.EventID, res, err)
+			return nil, u.abortOrderWorkflow(pctx, cfg, workflow)
 		}
-
-		// เอาข้อมูลของ saga ไป save
-		if err := u.finishStep(saga, res.TransactionId, ""); err != nil {
-			return nil, u.abortSaga(pctx, cfg, saga)
+		if err := u.finishStep(workflow, res.TransactionId, ""); err != nil {
+			return nil, u.abortOrderWorkflow(pctx, cfg, workflow)
 		}
 	}
 
-	//เอาของ เข้า กระเป๋า
 	out := make([]*payment.PaymentTransferRes, 0, len(req.Items))
-	for _, paid := range doneSteps(saga, stepDockMoney) {
-		// สร้าง step เพื่อเอาใว้ track
+	for _, paid := range doneSteps(workflow, stepCapturePayment) {
 		step := paymentStep{EventID: newEventID(), ItemID: paid.ItemID, Amount: paid.Amount, TransactionID: paid.TransactionID}
-		if err := u.trackStep(saga, step, stepAddItem, stepSent); err != nil {
-			return nil, u.abortSaga(pctx, cfg, saga)
+		if err := u.trackStep(workflow, step, stepFulfillLineItem, stepSent); err != nil {
+			return nil, u.abortOrderWorkflow(pctx, cfg, workflow)
 		}
-
-		//ส่งข้อมูล Item เข้า kafka โดยมี topic inventory
-		res, err := u.addItem(pctx, cfg, playerId, step)
+		res, err := u.fulfillLineItem(pctx, cfg, playerId, step)
 		if err != nil || res == nil || res.Error != "" {
-			u.logStep("buy add item", step.EventID, res, err)
-			return nil, u.abortSaga(pctx, cfg, saga)
+			u.logStep("fulfill line item", step.EventID, res, err)
+			return nil, u.abortOrderWorkflow(pctx, cfg, workflow)
 		}
-		if err := u.finishStep(saga, paid.TransactionID, res.InventoryId); err != nil {
-			return nil, u.abortSaga(pctx, cfg, saga)
+		if err := u.finishStep(workflow, paid.TransactionID, res.InventoryId); err != nil {
+			return nil, u.abortOrderWorkflow(pctx, cfg, workflow)
 		}
 		out = append(out, &payment.PaymentTransferRes{
 			EventId:       step.EventID,
@@ -191,9 +184,9 @@ func (u *paymentUsecase) BuyItem(pctx context.Context, cfg *config.Config, playe
 		})
 	}
 
-	saga.Status = sagaCompleted
-	if err := u.saveSaga(saga); err != nil {
-		return nil, u.abortSaga(pctx, cfg, saga)
+	workflow.Status = workflowCompleted
+	if err := u.saveOrderWorkflow(workflow); err != nil {
+		return nil, u.abortOrderWorkflow(pctx, cfg, workflow)
 	}
 	return out, nil
 }
@@ -203,44 +196,44 @@ func (u *paymentUsecase) SellItem(pctx context.Context, cfg *config.Config, play
 		return nil, err
 	}
 
-	saga := &payment.Saga{ID: newEventID(), PlayerID: playerId, Action: "sell", Status: sagaRunning}
-	if err := u.saveSaga(saga); err != nil {
+	workflow := &payment.OrderWorkflow{ID: newEventID(), PlayerID: playerId, Action: "sell", Status: workflowRunning}
+	if err := u.saveOrderWorkflow(workflow); err != nil {
 		return nil, errors.New("error: sell item failed")
 	}
 
 	for _, item := range req.Items {
 		step := paymentStep{EventID: newEventID(), ItemID: item.ItemId, Amount: item.Price}
-		if err := u.trackStep(saga, step, stepRemoveItem, stepSent); err != nil {
-			return nil, u.abortSaga(pctx, cfg, saga)
+		if err := u.trackStep(workflow, step, stepRemoveItem, stepSent); err != nil {
+			return nil, u.abortOrderWorkflow(pctx, cfg, workflow)
 		}
 		res, err := u.removeItem(pctx, cfg, playerId, step)
 		if err != nil || res == nil || res.Error != "" {
 			u.logStep("sell remove item", step.EventID, res, err)
-			return nil, u.abortSaga(pctx, cfg, saga)
+			return nil, u.abortOrderWorkflow(pctx, cfg, workflow)
 		}
-		if err := u.finishStep(saga, "", ""); err != nil {
-			return nil, u.abortSaga(pctx, cfg, saga)
+		if err := u.finishStep(workflow, "", ""); err != nil {
+			return nil, u.abortOrderWorkflow(pctx, cfg, workflow)
 		}
 	}
 
 	out := make([]*payment.PaymentTransferRes, 0, len(req.Items))
-	for _, item := range doneSteps(saga, stepRemoveItem) {
+	for _, item := range doneSteps(workflow, stepRemoveItem) {
 		payout := sellPayout(item.Amount)
 		if payout <= 0 {
 			log.Printf("Error: sell payout is zero item_id=%s", item.ItemID)
-			return nil, u.abortSaga(pctx, cfg, saga)
+			return nil, u.abortOrderWorkflow(pctx, cfg, workflow)
 		}
 		step := paymentStep{EventID: newEventID(), ItemID: item.ItemID, Amount: payout}
-		if err := u.trackStep(saga, step, stepAddMoney, stepSent); err != nil {
-			return nil, u.abortSaga(pctx, cfg, saga)
+		if err := u.trackStep(workflow, step, stepAddMoney, stepSent); err != nil {
+			return nil, u.abortOrderWorkflow(pctx, cfg, workflow)
 		}
 		res, err := u.addMoney(pctx, cfg, playerId, step)
 		if err != nil || res == nil || res.Error != "" {
 			u.logStep("sell add money", step.EventID, res, err)
-			return nil, u.abortSaga(pctx, cfg, saga)
+			return nil, u.abortOrderWorkflow(pctx, cfg, workflow)
 		}
-		if err := u.finishStep(saga, res.TransactionId, ""); err != nil {
-			return nil, u.abortSaga(pctx, cfg, saga)
+		if err := u.finishStep(workflow, res.TransactionId, ""); err != nil {
+			return nil, u.abortOrderWorkflow(pctx, cfg, workflow)
 		}
 		out = append(out, &payment.PaymentTransferRes{
 			EventId:       step.EventID,
@@ -251,32 +244,32 @@ func (u *paymentUsecase) SellItem(pctx context.Context, cfg *config.Config, play
 		})
 	}
 
-	saga.Status = sagaCompleted
-	if err := u.saveSaga(saga); err != nil {
-		return nil, u.abortSaga(pctx, cfg, saga)
+	workflow.Status = workflowCompleted
+	if err := u.saveOrderWorkflow(workflow); err != nil {
+		return nil, u.abortOrderWorkflow(pctx, cfg, workflow)
 	}
 	return out, nil
 }
 
-// RecoverStaleSagas ชดเชย saga ที่ค้าง status running นานกว่า sagaStaleAfter (เรียกซ้ำจาก payment consumer loop)
-func (u *paymentUsecase) RecoverStaleSagas(pctx context.Context, cfg *config.Config) {
-	sagas, err := u.paymentRepository.ListStaleSagas(pctx, time.Now().Add(-sagaStaleAfter))
+// RecoverStaleOrderWorkflows ชดเชย ProcessInstance ที่ค้าง running
+func (u *paymentUsecase) RecoverStaleOrderWorkflows(pctx context.Context, cfg *config.Config) {
+	workflows, err := u.paymentRepository.ListStaleOrderWorkflows(pctx, time.Now().Add(-orderWorkflowStaleAfter))
 	if err != nil {
-		log.Printf("Error: recover saga: %s", err.Error())
+		log.Printf("Error: recover order workflow: %s", err.Error())
 		return
 	}
-	for _, saga := range sagas {
-		log.Printf("Info: recover stale saga %s action=%s", saga.ID, saga.Action)
-		u.compensate(pctx, cfg, saga)
-		saga.Status = sagaFailed
-		if err := u.saveSaga(saga); err != nil {
-			log.Printf("Error: mark recovered saga %s: %s", saga.ID, err.Error())
+	for _, workflow := range workflows {
+		log.Printf("Info: recover stale order workflow %s action=%s", workflow.ID, workflow.Action)
+		u.compensate(pctx, cfg, workflow)
+		workflow.Status = workflowFailed
+		if err := u.saveOrderWorkflow(workflow); err != nil {
+			log.Printf("Error: mark recovered workflow %s: %s", workflow.ID, err.Error())
 		}
 	}
 }
 
-func (u *paymentUsecase) trackStep(saga *payment.Saga, step paymentStep, kind, status string) error {
-	saga.Steps = append(saga.Steps, payment.SagaStep{
+func (u *paymentUsecase) trackStep(workflow *payment.OrderWorkflow, step paymentStep, kind, status string) error {
+	workflow.Steps = append(workflow.Steps, payment.OrderWorkflowStep{
 		EventID:       step.EventID,
 		Kind:          kind,
 		ItemID:        step.ItemID,
@@ -285,11 +278,11 @@ func (u *paymentUsecase) trackStep(saga *payment.Saga, step paymentStep, kind, s
 		InventoryID:   step.InventoryID,
 		Status:        status,
 	})
-	return u.saveSaga(saga)
+	return u.saveOrderWorkflow(workflow)
 }
 
-func (u *paymentUsecase) finishStep(saga *payment.Saga, transactionID, inventoryID string) error {
-	last := &saga.Steps[len(saga.Steps)-1]
+func (u *paymentUsecase) finishStep(workflow *payment.OrderWorkflow, transactionID, inventoryID string) error {
+	last := &workflow.Steps[len(workflow.Steps)-1]
 	last.Status = stepDone
 	if transactionID != "" {
 		last.TransactionID = transactionID
@@ -297,27 +290,26 @@ func (u *paymentUsecase) finishStep(saga *payment.Saga, transactionID, inventory
 	if inventoryID != "" {
 		last.InventoryID = inventoryID
 	}
-	return u.saveSaga(saga)
+	return u.saveOrderWorkflow(workflow)
 }
 
-func (u *paymentUsecase) abortSaga(pctx context.Context, cfg *config.Config, saga *payment.Saga) error {
-	u.compensate(pctx, cfg, saga)
-	saga.Status = sagaFailed
-	if err := u.saveSaga(saga); err != nil {
-		log.Printf("Error: abort saga %s: %s", saga.ID, err.Error())
+func (u *paymentUsecase) abortOrderWorkflow(pctx context.Context, cfg *config.Config, workflow *payment.OrderWorkflow) error {
+	u.compensate(pctx, cfg, workflow)
+	workflow.Status = workflowFailed
+	if err := u.saveOrderWorkflow(workflow); err != nil {
+		log.Printf("Error: abort order workflow %s: %s", workflow.ID, err.Error())
 	}
-	if saga.Action == "sell" {
+	if workflow.Action == "sell" {
 		return errors.New("error: sell item failed")
 	}
 	return errors.New("error: buy item failed")
 }
 
-func (u *paymentUsecase) compensate(pctx context.Context, cfg *config.Config, saga *payment.Saga) {
+func (u *paymentUsecase) compensate(pctx context.Context, cfg *config.Config, workflow *payment.OrderWorkflow) {
 	money := make([]paymentStep, 0)
 	added := make([]paymentStep, 0)
 	removed := make([]paymentStep, 0)
-	for _, step := range saga.Steps {
-		// rollback เฉพาะ step ที่ทำสำเร็จแล้ว (done) — ไม่ย้อน step ที่ค้างแค่ sent
+	for _, step := range workflow.Steps {
 		if step.Status != stepDone {
 			continue
 		}
@@ -329,33 +321,47 @@ func (u *paymentUsecase) compensate(pctx context.Context, cfg *config.Config, sa
 			InventoryID:   step.InventoryID,
 		}
 		switch step.Kind {
-		case stepDockMoney, stepAddMoney:
+		case stepCapturePayment, stepCapturePaymentLegacy, stepAddMoney:
 			money = append(money, recorded)
-		case stepAddItem:
+		case stepFulfillLineItem, stepFulfillLineItemLegacy:
 			added = append(added, recorded)
 		case stepRemoveItem:
 			removed = append(removed, recorded)
 		}
 	}
 	u.rollbackAddedItems(pctx, cfg, added)
-	u.rollbackRemovedItems(pctx, cfg, saga.PlayerID, removed)
+	u.rollbackRemovedItems(pctx, cfg, workflow.PlayerID, removed)
 	u.rollbackMoney(pctx, cfg, money)
 }
 
-func (u *paymentUsecase) saveSaga(saga *payment.Saga) error {
+func (u *paymentUsecase) saveOrderWorkflow(workflow *payment.OrderWorkflow) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := u.paymentRepository.SaveSaga(ctx, saga); err != nil {
-		log.Printf("Error: save saga %s: %s", saga.ID, err.Error())
+	if err := u.paymentRepository.SaveOrderWorkflow(ctx, workflow); err != nil {
+		log.Printf("Error: save order workflow %s: %s", workflow.ID, err.Error())
 		return err
 	}
 	return nil
 }
 
-func doneSteps(saga *payment.Saga, kind string) []paymentStep {
+func stepKindMatches(storedKind, targetKind string) bool {
+	if storedKind == targetKind {
+		return true
+	}
+	switch targetKind {
+	case stepCapturePayment:
+		return storedKind == stepCapturePaymentLegacy
+	case stepFulfillLineItem:
+		return storedKind == stepFulfillLineItemLegacy
+	default:
+		return false
+	}
+}
+
+func doneSteps(workflow *payment.OrderWorkflow, kind string) []paymentStep {
 	steps := make([]paymentStep, 0)
-	for _, step := range saga.Steps {
-		if step.Kind != kind || step.Status != stepDone {
+	for _, step := range workflow.Steps {
+		if !stepKindMatches(step.Kind, kind) || step.Status != stepDone {
 			continue
 		}
 		steps = append(steps, paymentStep{
@@ -373,7 +379,7 @@ func (u *paymentUsecase) prepareItems(pctx context.Context, cfg *config.Config, 
 	if req == nil || len(req.Items) == 0 {
 		return errors.New("error: items is empty")
 	}
-	if err := u.FindItemsInIds(pctx, cfg.Grpc.ItemUrl, req.Items); err != nil {
+	if err := u.ResolvePricingFromCatalog(pctx, cfg.Grpc.ItemUrl, req.Items); err != nil {
 		return err
 	}
 	for _, item := range req.Items {
@@ -384,11 +390,12 @@ func (u *paymentUsecase) prepareItems(pctx context.Context, cfg *config.Config, 
 	return nil
 }
 
-func (u *paymentUsecase) dockMoney(pctx context.Context, cfg *config.Config, playerId string, step paymentStep) (*payment.PaymentTransferRes, error) {
+// capturePayment หักเงินผ่าน Kafka (เดิม dockMoney)
+func (u *paymentUsecase) capturePayment(pctx context.Context, cfg *config.Config, playerId string, step paymentStep) (*payment.PaymentTransferRes, error) {
 	ch := u.register(step.EventID)
 	defer u.unregister(step.EventID)
 
-	if err := u.paymentRepository.DockedPlayerMoney(pctx, cfg, &player.CreatePlayerTransactionReq{
+	if err := u.paymentRepository.CapturePayment(pctx, cfg, &player.CreatePlayerTransactionReq{
 		PlayerId: playerId,
 		Amount:   -step.Amount,
 		EventId:  step.EventID,
@@ -412,7 +419,8 @@ func (u *paymentUsecase) addMoney(pctx context.Context, cfg *config.Config, play
 	return u.waitReply(pctx, step.EventID, ch)
 }
 
-func (u *paymentUsecase) addItem(pctx context.Context, cfg *config.Config, playerId string, step paymentStep) (*payment.PaymentTransferRes, error) {
+// fulfillLineItem ใส่ของ / GrantEntitlement (เดิม addItem)
+func (u *paymentUsecase) fulfillLineItem(pctx context.Context, cfg *config.Config, playerId string, step paymentStep) (*payment.PaymentTransferRes, error) {
 	ch := u.register(step.EventID)
 	defer u.unregister(step.EventID)
 
@@ -484,7 +492,8 @@ func (u *paymentUsecase) logStep(step, eventID string, res *payment.PaymentTrans
 	}
 }
 
-func (u *paymentUsecase) FindItemsInIds(pctx context.Context, grpcUrl string, req []*payment.ItemServiceReqDatum) error {
+// ResolvePricingFromCatalog ดึงราคาจาก ProductCatalog (เดิม FindItemsInIds)
+func (u *paymentUsecase) ResolvePricingFromCatalog(pctx context.Context, grpcUrl string, req []*payment.ItemServiceReqDatum) error {
 	setIds := make(map[string]bool)
 	for _, v := range req {
 		if !setIds[v.ItemId] {
@@ -492,7 +501,7 @@ func (u *paymentUsecase) FindItemsInIds(pctx context.Context, grpcUrl string, re
 		}
 	}
 
-	itemData, err := u.paymentRepository.FindItemsInIds(pctx, grpcUrl, &itemPb.FindItemsInIdsReq{
+	itemData, err := u.paymentRepository.FindProductsInCatalog(pctx, grpcUrl, &itemPb.FindItemsInIdsReq{
 		Ids: func() []string {
 			itemIds := make([]string, 0)
 			for k := range setIds {
@@ -502,7 +511,7 @@ func (u *paymentUsecase) FindItemsInIds(pctx context.Context, grpcUrl string, re
 		}(),
 	})
 	if err != nil {
-		log.Printf("Error: FindItemsInIds failed: %s", err.Error())
+		log.Printf("Error: ResolvePricingFromCatalog failed: %s", err.Error())
 		return errors.New("error: items not found")
 	}
 
@@ -520,7 +529,7 @@ func (u *paymentUsecase) FindItemsInIds(pctx context.Context, grpcUrl string, re
 	for i := range req {
 		found, ok := itemMaps[req[i].ItemId]
 		if !ok {
-			log.Printf("Error: FindItemsInIds failed: item %s not found", req[i].ItemId)
+			log.Printf("Error: ResolvePricingFromCatalog: item %s not found", req[i].ItemId)
 			return errors.New("error: items not found")
 		}
 		req[i].Price = found.Price

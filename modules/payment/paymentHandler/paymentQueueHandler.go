@@ -58,8 +58,8 @@ func (h *paymentQueueHandler) Listen() {
 
 	log.Println("Start payment reply consumer")
 	// รัน recover saga ค้างทันทีตอนสตาร์ท แล้ววนซ้ำตาม interval (ไม่พึ่ง restart อย่างเดียว)
-	h.paymentUsecase.RecoverStaleSagas(ctx, h.config)
-	go h.runStaleSagaRecoveryLoop(ctx)
+	h.paymentUsecase.RecoverStaleOrderWorkflows(ctx, h.config)
+	go h.runStaleOrderWorkflowRecoveryLoop(ctx)
 
 	for {
 		select {
@@ -79,15 +79,15 @@ func (h *paymentQueueHandler) Listen() {
 	}
 }
 
-func (h *paymentQueueHandler) runStaleSagaRecoveryLoop(ctx context.Context) {
-	ticker := time.NewTicker(paymentUsecase.SagaRecoverInterval)
+func (h *paymentQueueHandler) runStaleOrderWorkflowRecoveryLoop(ctx context.Context) {
+	ticker := time.NewTicker(paymentUsecase.OrderWorkflowRecoverInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			h.paymentUsecase.RecoverStaleSagas(ctx, h.config)
+			h.paymentUsecase.RecoverStaleOrderWorkflows(ctx, h.config)
 		}
 	}
 }
